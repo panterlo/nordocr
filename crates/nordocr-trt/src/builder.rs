@@ -2,15 +2,34 @@ use std::path::Path;
 
 use nordocr_core::{OcrError, Result};
 
+/// Configuration for targeting NVIDIA's Deep Learning Accelerator (cuDLA).
+/// Available on Blackwell GPUs, the DLA is a dedicated inference engine
+/// separate from the GPU SMs. Running detection or recognition on DLA
+/// frees GPU SMs for preprocessing kernels — enabling true parallelism.
+pub struct DlaConfig {
+    /// DLA core to target (0 or 1 on Blackwell).
+    pub core: u32,
+    /// Allow GPU fallback for layers the DLA doesn't support.
+    pub allow_gpu_fallback: bool,
+}
+
 /// Builder for creating optimized TensorRT engines from ONNX models.
 pub struct TrtEngineBuilder {
     fp8_enabled: bool,
+    /// Enable FP4 (NF4) quantization — a Blackwell-only, experimental precision
+    /// mode. NF4 provides roughly 2x throughput over FP8 for weight-bound layers
+    /// by packing weights into 4-bit normal-float format. However, NF4 may
+    /// degrade accuracy on small models like PARSeq-S; benchmark carefully before
+    /// deploying in production.
     fp4_enabled: bool,
     sparsity_enabled: bool,
     max_batch_size: u32,
     max_workspace_size: usize,
     /// Optimization profiles for dynamic shapes.
     profiles: Vec<OptimizationProfile>,
+    /// Optional DLA targeting configuration for offloading inference to
+    /// Blackwell's dedicated Deep Learning Accelerator cores.
+    dla_config: Option<DlaConfig>,
 }
 
 /// An optimization profile specifying min/opt/max shapes for dynamic dims.
@@ -41,6 +60,7 @@ impl TrtEngineBuilder {
             max_batch_size: 1,
             max_workspace_size: 1 << 30, // 1 GB default
             profiles: Vec::new(),
+            dla_config: None,
         }
     }
 
@@ -50,7 +70,12 @@ impl TrtEngineBuilder {
         self
     }
 
-    /// Enable FP4 quantization (experimental, Blackwell only).
+    /// Enable FP4 (NF4) quantization (experimental, Blackwell only).
+    ///
+    /// NF4 provides roughly 2x throughput over FP8 for weight-bound layers by
+    /// packing weights into 4-bit normal-float format. However, accuracy may
+    /// degrade on small models like PARSeq-S — benchmark carefully before
+    /// deploying in production.
     pub fn with_fp4(mut self) -> Self {
         self.fp4_enabled = true;
         self
@@ -59,6 +84,12 @@ impl TrtEngineBuilder {
     /// Enable structured sparsity (2:4).
     pub fn with_sparsity(mut self) -> Self {
         self.sparsity_enabled = true;
+        self
+    }
+
+    /// Target a DLA core for inference, freeing GPU SMs for other work.
+    pub fn with_dla(mut self, config: DlaConfig) -> Self {
+        self.dla_config = Some(config);
         self
     }
 
@@ -125,6 +156,13 @@ impl TrtEngineBuilder {
         //    }
         //    if self.sparsity_enabled {
         //        config.setFlag(BuilderFlag::SPARSE_WEIGHTS);
+        //    }
+        //    if let Some(dla) = &self.dla_config {
+        //        config.setDefaultDeviceType(DeviceType::kDLA);
+        //        config.setDLACore(dla.core);
+        //        if dla.allow_gpu_fallback {
+        //            config.setFlag(BuilderFlag::GPU_FALLBACK);
+        //        }
         //    }
         //
         // 3. Set optimization profiles for dynamic shapes

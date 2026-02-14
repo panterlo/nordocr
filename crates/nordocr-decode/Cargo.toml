@@ -3,6 +3,10 @@ name = "nordocr-decode"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+dali = []
+
 [dependencies]
 nordocr-core = { workspace = true }
 nordocr-gpu = { workspace = true }

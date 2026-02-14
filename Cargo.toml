@@ -75,6 +75,9 @@ bytes = "1"
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 
+# NVIDIA DALI (forward-looking: GPU-accelerated image decode pipeline)
+nvidia-dali = { version = "1", optional = true }
+
 # Build deps
 bindgen = "0.70"
 

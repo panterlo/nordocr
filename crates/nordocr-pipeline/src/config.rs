@@ -1,5 +1,98 @@
 use serde::{Deserialize, Serialize};
 
+/// Detection model architecture.
+///
+/// DBNet++ is the proven default. RTMDet is a newer single-stage detector
+/// that may be faster at comparable accuracy — benchmark both on your
+/// document test set before switching.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub enum DetectModelArch {
+    /// DBNet++ with differentiable binarization. Proven on document benchmarks.
+    /// Single-pass, fully convolutional, no NMS needed.
+    #[default]
+    DBNetPP,
+    /// RTMDet (Real-Time Models for Object Detection). MMLAB's latest
+    /// single-stage detector. Potentially faster than DBNet++ with CSPNeXt
+    /// backbone, but less tested on document text detection specifically.
+    /// Export: PyTorch → ONNX → TensorRT, same as DBNet++.
+    RTMDet,
+}
+
+/// Recognition model architecture.
+///
+/// PARSeq is the default for its parallel decoding speed. Newer
+/// alternatives may offer better accuracy on specific character classes.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub enum RecogModelArch {
+    /// PARSeq (Permutation AutoRegressive Sequence model). Non-autoregressive:
+    /// all character positions decoded in parallel. ~3-5x faster inference
+    /// than autoregressive models. Best overall speed/accuracy tradeoff.
+    #[default]
+    PARSeq,
+    /// MAERec (Masked Autoencoder for scene text Recognition). Uses MAE
+    /// pre-training for stronger visual features. May outperform PARSeq on
+    /// degraded/noisy scans. Autoregressive decoding — slower inference
+    /// but potentially higher accuracy on hard cases.
+    MAERec,
+    /// CLIP4STR (CLIP for Scene Text Recognition). Leverages CLIP's
+    /// vision-language pre-training for robust character recognition.
+    /// Strongest zero-shot generalization to unseen fonts/styles.
+    /// Heavier model (~100M+ params vs PARSeq's ~20M) — use only if
+    /// accuracy on unusual fonts justifies the throughput cost.
+    CLIP4STR,
+}
+
+/// TensorRT precision mode for inference engines.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub enum InferencePrecision {
+    /// FP32 — maximum accuracy, lowest throughput. Debugging only.
+    FP32,
+    /// FP16 — good accuracy/speed tradeoff. Works on all GPUs.
+    /// Use this on A6000 Ada (sm_89).
+    #[default]
+    FP16,
+    /// FP8 (E4M3) — ~2x throughput over FP16. Requires Blackwell (sm_120)
+    /// or Hopper (sm_90). Needs calibration data for quantization.
+    FP8,
+    /// FP4 (NF4) — experimental, ~2x throughput over FP8 on weight-bound
+    /// layers. Blackwell (sm_120) only. May degrade accuracy on small
+    /// models (PARSeq-S has only ~20M params — limited redundancy to
+    /// absorb quantization error). Best suited for detection backbone
+    /// where the model is larger.
+    FP4,
+}
+
+/// DLA (Deep Learning Accelerator) offload configuration.
+///
+/// Blackwell GPUs include dedicated DLA cores that can run inference
+/// independently of the GPU's SM cores. By offloading detection or
+/// recognition to DLA, the GPU SMs remain free for preprocessing
+/// CUDA kernels — enabling true pipeline parallelism.
+///
+/// Not available on A6000 Ada. On Blackwell, there are typically 2 DLA cores.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DlaOffloadConfig {
+    /// Offload detection model to DLA.
+    pub offload_detect: bool,
+    /// Offload recognition model to DLA.
+    pub offload_recognize: bool,
+    /// DLA core index (0 or 1).
+    pub dla_core: u32,
+    /// Allow GPU fallback for layers the DLA doesn't support.
+    pub allow_gpu_fallback: bool,
+}
+
+impl Default for DlaOffloadConfig {
+    fn default() -> Self {
+        Self {
+            offload_detect: false,
+            offload_recognize: false,
+            dla_core: 0,
+            allow_gpu_fallback: true,
+        }
+    }
+}
+
 /// Runtime configuration for the OCR pipeline.
 ///
 /// # GPU targets
@@ -21,6 +114,14 @@ pub struct PipelineConfig {
     /// Path to the recognition TensorRT engine file.
     /// Must be built for the target GPU architecture.
     pub recognize_engine_path: String,
+
+    // Model architecture selection.
+    /// Detection model architecture.
+    pub detect_model: DetectModelArch,
+    /// Recognition model architecture.
+    pub recognize_model: RecogModelArch,
+    /// Inference precision for TensorRT engines.
+    pub precision: InferencePrecision,
 
     // Detection settings.
     /// Maximum batch size for detection (pages per batch).
@@ -53,6 +154,11 @@ pub struct PipelineConfig {
     pub enable_cuda_graph: bool,
     /// Whether to run preprocessing.
     pub enable_preprocess: bool,
+    /// Whether to use NVIDIA DALI for GPU-accelerated image decode.
+    /// Falls back to nvJPEG + image crate if DALI is unavailable.
+    pub enable_dali: bool,
+    /// DLA offload configuration (Blackwell only).
+    pub dla: DlaOffloadConfig,
     /// Override GPU architecture instead of auto-detecting.
     /// Values: "sm_89" (A6000 Ada) or "sm_120" (RTX 6000 PRO Blackwell).
     /// None = auto-detect from CUDA device properties.
@@ -64,6 +170,10 @@ impl Default for PipelineConfig {
         Self {
             detect_engine_path: "models/detect.engine".to_string(),
             recognize_engine_path: "models/recognize.engine".to_string(),
+
+            detect_model: DetectModelArch::default(),
+            recognize_model: RecogModelArch::default(),
+            precision: InferencePrecision::default(),
 
             detect_max_batch: 4,
             detect_input_height: 1024,
@@ -80,6 +190,8 @@ impl Default for PipelineConfig {
             gpu_pool_size: 256 * 1024 * 1024, // 256 MB
             enable_cuda_graph: true,
             enable_preprocess: true,
+            enable_dali: false,
+            dla: DlaOffloadConfig::default(),
             gpu_arch_override: None,
         }
     }
@@ -88,31 +200,77 @@ impl Default for PipelineConfig {
 /// Configuration presets for known GPU targets.
 impl PipelineConfig {
     /// Preset for development on A6000 Ada (sm_89, 48 GB VRAM).
+    ///
+    /// Uses FP16 precision (FP8/FP4 not available on Ada).
+    /// No DLA (Ada doesn't have dedicated DLA cores).
+    /// Smaller batch sizes to match Ada's SM count.
     pub fn a6000_ada() -> Self {
         Self {
             detect_engine_path: "models/detect_sm89.engine".to_string(),
             recognize_engine_path: "models/recognize_sm89.engine".to_string(),
             gpu_arch_override: Some("sm_89".to_string()),
-            // A6000 Ada has fewer SMs than Blackwell — smaller batches.
+            precision: InferencePrecision::FP16,
             detect_max_batch: 2,
             recognize_max_batch: 32,
             num_streams: 2,
+            dla: DlaOffloadConfig::default(), // DLA not available on Ada
             ..Self::default()
         }
     }
 
     /// Preset for production on RTX 6000 PRO Blackwell (sm_120, 96 GB VRAM).
+    ///
+    /// Uses FP8 precision for ~2x throughput over FP16.
+    /// Larger batch sizes to saturate Blackwell's SM count.
+    /// DLA offload available but disabled by default (enable after benchmarking).
     pub fn rtx6000_pro_blackwell() -> Self {
         Self {
             detect_engine_path: "models/detect_sm120.engine".to_string(),
             recognize_engine_path: "models/recognize_sm120.engine".to_string(),
             gpu_arch_override: Some("sm_120".to_string()),
-            // Blackwell has more SMs, larger L2, higher memory bandwidth.
+            precision: InferencePrecision::FP8,
             detect_max_batch: 8,
             recognize_max_batch: 128,
             num_streams: 4,
             gpu_pool_size: 512 * 1024 * 1024, // 512 MB
             ..Self::default()
+        }
+    }
+
+    /// Experimental: Blackwell with DLA offload.
+    ///
+    /// Runs detection on DLA core 0, freeing all GPU SMs for preprocessing
+    /// and recognition. Theoretical benefit: preprocessing CUDA kernels run
+    /// concurrently with detection inference on separate hardware.
+    pub fn rtx6000_pro_blackwell_dla() -> Self {
+        Self {
+            dla: DlaOffloadConfig {
+                offload_detect: true,
+                offload_recognize: false,
+                dla_core: 0,
+                allow_gpu_fallback: true,
+            },
+            ..Self::rtx6000_pro_blackwell()
+        }
+    }
+
+    /// Experimental: Maximum throughput on Blackwell with FP4 + DLA.
+    ///
+    /// Uses FP4 (NF4) quantization for recognition + DLA for detection.
+    /// WARNING: FP4 on PARSeq-S (~20M params) may degrade diacritical
+    /// accuracy. Validate on the Nordic test set before deploying.
+    pub fn rtx6000_pro_blackwell_experimental() -> Self {
+        Self {
+            precision: InferencePrecision::FP4,
+            dla: DlaOffloadConfig {
+                offload_detect: true,
+                offload_recognize: false,
+                dla_core: 0,
+                allow_gpu_fallback: true,
+            },
+            enable_dali: true,
+            recognize_max_batch: 256,
+            ..Self::rtx6000_pro_blackwell()
         }
     }
 }

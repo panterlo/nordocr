@@ -232,3 +232,94 @@ nordocr-core          (no deps — shared types/errors)
 5. **Multi-arch fat binaries** — CUDA kernels compiled for both sm_89 (A6000 Ada) and sm_120 (RTX 6000 PRO Blackwell). Set `NORDOCR_CUDA_ARCHS` to override.
 6. **FP8 inference on Blackwell, FP16 on Ada** — TensorRT engines built with `--fp8` for sm_120, `--fp16` for sm_89. Separate engine files per architecture.
 7. **Nordic charset as distinct letters** — å/ä/ö/ø/æ are NOT accented variants of a/o/e. The charset, training data, and evaluation metrics all treat them as separate letters.
+
+---
+
+## Experimental / Cutting-Edge Features
+
+These are integrated into the codebase but should be benchmarked before production use.
+
+### Model Alternatives
+
+The pipeline supports swappable model architectures via `PipelineConfig`:
+
+| Stage | Default | Alternatives | Trade-off |
+|---|---|---|---|
+| **Detection** | DBNet++ | RTMDet | RTMDet may be faster (single-stage, CSPNeXt backbone) but less tested on documents |
+| **Recognition** | PARSeq | MAERec, CLIP4STR | MAERec: better on degraded scans (MAE pre-training). CLIP4STR: best font generalization (CLIP backbone) but ~5-10x slower |
+
+Set via config:
+```json
+{
+  "detect_model": "RTMDet",
+  "recognize_model": "MAERec"
+}
+```
+
+Training scripts for all variants are in `training/detect/` and `training/recognize/`.
+Export all model variants + build engines for both GPUs: `python training/export/export_onnx_all.py`
+
+### NVIDIA DALI (GPU-Accelerated Decode)
+
+Replaces nvJPEG + manual resize + normalize with a single fused GPU pipeline.
+
+- Feature-gated: `cargo build --features nordocr-decode/dali`
+- Eliminates intermediate GPU memory allocations between decode stages
+- Built-in double-buffered prefetch for batch workloads
+- Falls back gracefully to standard decode if DALI unavailable
+- Enabled via `PipelineConfig { enable_dali: true, .. }`
+- Code: `crates/nordocr-decode/src/dali.rs`
+
+### cuDLA (Deep Learning Accelerator) Offload
+
+Blackwell GPUs include dedicated DLA cores separate from the GPU SMs. Offloading detection to DLA frees GPU SMs for preprocessing kernels — true hardware parallelism.
+
+- Configured via `DlaConfig` in `nordocr-trt` builder
+- `PipelineConfig::rtx6000_pro_blackwell_dla()` preset enables it
+- Not available on A6000 Ada (sm_89)
+- Recommended: offload detection to DLA, keep recognition on GPU SMs
+- Code: `DlaConfig` in `crates/nordocr-trt/src/builder.rs`
+
+### FP4 (NF4) Quantization
+
+~2x throughput over FP8 for weight-bound layers. Blackwell (sm_120) only.
+
+- Configured via `TrtEngineBuilder::with_fp4()`
+- `PipelineConfig { precision: InferencePrecision::FP4, .. }`
+- `PipelineConfig::rtx6000_pro_blackwell_experimental()` preset enables FP4 + DLA + DALI
+- **WARNING**: PARSeq-S has only ~20M params — limited redundancy to absorb quantization error. FP4 may degrade diacritical accuracy. Validate on the Nordic test set before deploying.
+- Better suited for the detection backbone (larger model, more redundancy)
+
+### Configuration Presets
+
+```rust
+// Development (A6000 Ada, conservative)
+PipelineConfig::a6000_ada()
+
+// Production (RTX 6000 PRO Blackwell, FP8)
+PipelineConfig::rtx6000_pro_blackwell()
+
+// Production + DLA offload
+PipelineConfig::rtx6000_pro_blackwell_dla()
+
+// Experimental maximum throughput (FP4 + DLA + DALI)
+PipelineConfig::rtx6000_pro_blackwell_experimental()
+```
+
+### Benchmarking Approach
+
+For each experimental feature, the recommended evaluation:
+
+1. **Baseline**: DBNet++ + PARSeq + FP16 on A6000 Ada
+2. **Production**: DBNet++ + PARSeq + FP8 on RTX 6000 PRO Blackwell
+3. **+DLA**: Same as #2 but with detection offloaded to DLA
+4. **+FP4**: Same as #3 but with FP4 recognition
+5. **+DALI**: Same as #4 but with DALI decode
+6. **Alt models**: Swap DBNet++ for RTMDet, PARSeq for MAERec/CLIP4STR
+
+Metrics per variant:
+- Throughput (pages/sec)
+- Latency (ms/page)
+- CER, WER
+- Diacritical accuracy (å/ä/ö/ø/æ)
+- GPU memory usage
