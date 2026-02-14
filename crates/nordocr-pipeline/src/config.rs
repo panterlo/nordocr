@@ -1,11 +1,25 @@
 use serde::{Deserialize, Serialize};
 
 /// Runtime configuration for the OCR pipeline.
+///
+/// # GPU targets
+///
+/// TensorRT engines are GPU-architecture-specific and must be rebuilt
+/// for each target GPU. The engine paths should point to files built
+/// for the GPU this process will run on:
+///
+/// - **Development (A6000 Ada, sm_89)**: `models/detect_sm89.engine`
+/// - **Production (RTX 6000 PRO Blackwell, sm_120)**: `models/detect_sm120.engine`
+///
+/// CUDA kernels (preprocessing) are compiled as fat binaries containing
+/// code for both architectures — no configuration needed there.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineConfig {
     /// Path to the detection TensorRT engine file.
+    /// Must be built for the target GPU architecture.
     pub detect_engine_path: String,
     /// Path to the recognition TensorRT engine file.
+    /// Must be built for the target GPU architecture.
     pub recognize_engine_path: String,
 
     // Detection settings.
@@ -39,6 +53,10 @@ pub struct PipelineConfig {
     pub enable_cuda_graph: bool,
     /// Whether to run preprocessing.
     pub enable_preprocess: bool,
+    /// Override GPU architecture instead of auto-detecting.
+    /// Values: "sm_89" (A6000 Ada) or "sm_120" (RTX 6000 PRO Blackwell).
+    /// None = auto-detect from CUDA device properties.
+    pub gpu_arch_override: Option<String>,
 }
 
 impl Default for PipelineConfig {
@@ -62,6 +80,39 @@ impl Default for PipelineConfig {
             gpu_pool_size: 256 * 1024 * 1024, // 256 MB
             enable_cuda_graph: true,
             enable_preprocess: true,
+            gpu_arch_override: None,
+        }
+    }
+}
+
+/// Configuration presets for known GPU targets.
+impl PipelineConfig {
+    /// Preset for development on A6000 Ada (sm_89, 48 GB VRAM).
+    pub fn a6000_ada() -> Self {
+        Self {
+            detect_engine_path: "models/detect_sm89.engine".to_string(),
+            recognize_engine_path: "models/recognize_sm89.engine".to_string(),
+            gpu_arch_override: Some("sm_89".to_string()),
+            // A6000 Ada has fewer SMs than Blackwell — smaller batches.
+            detect_max_batch: 2,
+            recognize_max_batch: 32,
+            num_streams: 2,
+            ..Self::default()
+        }
+    }
+
+    /// Preset for production on RTX 6000 PRO Blackwell (sm_120, 96 GB VRAM).
+    pub fn rtx6000_pro_blackwell() -> Self {
+        Self {
+            detect_engine_path: "models/detect_sm120.engine".to_string(),
+            recognize_engine_path: "models/recognize_sm120.engine".to_string(),
+            gpu_arch_override: Some("sm_120".to_string()),
+            // Blackwell has more SMs, larger L2, higher memory bandwidth.
+            detect_max_batch: 8,
+            recognize_max_batch: 128,
+            num_streams: 4,
+            gpu_pool_size: 512 * 1024 * 1024, // 512 MB
+            ..Self::default()
         }
     }
 }

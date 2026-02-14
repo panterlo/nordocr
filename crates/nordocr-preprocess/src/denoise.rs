@@ -1,9 +1,12 @@
 use nordocr_core::{OcrError, Result};
 use nordocr_gpu::{GpuBuffer, GpuContext};
 
+use crate::gpu_arch::{self, GpuArch};
+
 /// Safe wrapper around the denoising CUDA kernels.
 pub struct DenoiseKernel {
     ptx_loaded: bool,
+    arch: GpuArch,
 }
 
 /// Denoising method selection.
@@ -32,17 +35,21 @@ impl Default for DenoiseMethod {
 }
 
 impl DenoiseKernel {
-    pub fn new(ctx: &GpuContext) -> Result<Self> {
-        let ptx = include_str!(concat!(env!("OUT_DIR"), "/denoise.ptx"));
+    pub fn new(ctx: &GpuContext, arch: GpuArch) -> Result<Self> {
+        let ptx = gpu_arch::select_ptx(
+            arch,
+            include_str!(concat!(env!("OUT_DIR"), "/denoise_sm89.ptx")),
+            include_str!(concat!(env!("OUT_DIR"), "/denoise_sm120.ptx")),
+        );
 
         if ptx.starts_with("// STUB") {
             tracing::warn!("denoise kernel is a stub — CUDA kernels not compiled");
-            return Ok(Self { ptx_loaded: false });
+            return Ok(Self { ptx_loaded: false, arch });
         }
 
         let _ = ctx;
-        tracing::debug!("loaded denoise PTX kernel");
-        Ok(Self { ptx_loaded: true })
+        tracing::debug!(arch = arch.name(), "loaded denoise PTX kernel");
+        Ok(Self { ptx_loaded: true, arch })
     }
 
     /// Apply denoising to a grayscale GPU image.

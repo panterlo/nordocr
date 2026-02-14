@@ -1,12 +1,15 @@
 use nordocr_core::{OcrError, Result};
 use nordocr_gpu::{GpuBuffer, GpuContext};
 
+use crate::gpu_arch::{self, GpuArch};
+
 /// Safe wrapper around the adaptive binarization CUDA kernel.
 ///
 /// Uses Sauvola's method with integral images for O(1) local thresholding.
 /// Optimized for scanned documents where illumination varies across the page.
 pub struct BinarizeKernel {
     ptx_loaded: bool,
+    arch: GpuArch,
 }
 
 /// Parameters for Sauvola adaptive binarization.
@@ -30,13 +33,17 @@ impl Default for BinarizeParams {
 }
 
 impl BinarizeKernel {
-    /// Load the binarization PTX and create kernel function handles.
-    pub fn new(ctx: &GpuContext) -> Result<Self> {
-        let ptx = include_str!(concat!(env!("OUT_DIR"), "/binarize.ptx"));
+    /// Load the binarization PTX for the detected GPU architecture.
+    pub fn new(ctx: &GpuContext, arch: GpuArch) -> Result<Self> {
+        let ptx = gpu_arch::select_ptx(
+            arch,
+            include_str!(concat!(env!("OUT_DIR"), "/binarize_sm89.ptx")),
+            include_str!(concat!(env!("OUT_DIR"), "/binarize_sm120.ptx")),
+        );
 
         if ptx.starts_with("// STUB") {
             tracing::warn!("binarize kernel is a stub — CUDA kernels not compiled");
-            return Ok(Self { ptx_loaded: false });
+            return Ok(Self { ptx_loaded: false, arch });
         }
 
         // In production with cudarc:
@@ -47,8 +54,8 @@ impl BinarizeKernel {
         //   )?;
         let _ = ctx;
 
-        tracing::debug!("loaded binarize PTX kernel");
-        Ok(Self { ptx_loaded: true })
+        tracing::debug!(arch = arch.name(), "loaded binarize PTX kernel");
+        Ok(Self { ptx_loaded: true, arch })
     }
 
     /// Execute adaptive binarization on a grayscale GPU image.
@@ -90,7 +97,7 @@ impl BinarizeKernel {
         //    ));
         //
         // 3. Run adaptive binarize
-        //    let block_2d = (32, 32, 1);
+        //    let block_2d = (32, 32, 1);  // works well on both sm_89 and sm_120
         //    let grid_2d = (width.div_ceil(32), height.div_ceil(32), 1);
         //    launch!(adaptive_binarize<<<grid_2d, block_2d, 0, stream>>>(
         //        input.ptr(), integral.ptr(), integral_sq.ptr(),

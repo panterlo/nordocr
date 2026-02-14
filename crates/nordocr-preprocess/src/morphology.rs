@@ -1,12 +1,15 @@
 use nordocr_core::{OcrError, Result};
 use nordocr_gpu::{GpuBuffer, GpuContext};
 
+use crate::gpu_arch::{self, GpuArch};
+
 /// Safe wrapper around morphological CUDA kernels.
 ///
 /// Provides erosion, dilation, opening, closing, and small-component
 /// removal for cleaning up binarized document images.
 pub struct MorphologyKernel {
     ptx_loaded: bool,
+    arch: GpuArch,
 }
 
 /// Morphological operation type.
@@ -25,17 +28,21 @@ pub enum MorphOp {
 }
 
 impl MorphologyKernel {
-    pub fn new(ctx: &GpuContext) -> Result<Self> {
-        let ptx = include_str!(concat!(env!("OUT_DIR"), "/morphology.ptx"));
+    pub fn new(ctx: &GpuContext, arch: GpuArch) -> Result<Self> {
+        let ptx = gpu_arch::select_ptx(
+            arch,
+            include_str!(concat!(env!("OUT_DIR"), "/morphology_sm89.ptx")),
+            include_str!(concat!(env!("OUT_DIR"), "/morphology_sm120.ptx")),
+        );
 
         if ptx.starts_with("// STUB") {
             tracing::warn!("morphology kernel is a stub — CUDA kernels not compiled");
-            return Ok(Self { ptx_loaded: false });
+            return Ok(Self { ptx_loaded: false, arch });
         }
 
         let _ = ctx;
-        tracing::debug!("loaded morphology PTX kernel");
-        Ok(Self { ptx_loaded: true })
+        tracing::debug!(arch = arch.name(), "loaded morphology PTX kernel");
+        Ok(Self { ptx_loaded: true, arch })
     }
 
     /// Apply a morphological operation on a binarized GPU image.

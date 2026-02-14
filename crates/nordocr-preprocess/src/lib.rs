@@ -1,11 +1,13 @@
 pub mod binarize;
 pub mod denoise;
 pub mod deskew;
+pub mod gpu_arch;
 pub mod morphology;
 
 pub use binarize::{BinarizeKernel, BinarizeParams};
 pub use denoise::{DenoiseKernel, DenoiseMethod};
 pub use deskew::{DeskewKernel, DeskewParams, DeskewResult};
+pub use gpu_arch::GpuArch;
 pub use morphology::{MorphOp, MorphologyKernel};
 
 use nordocr_core::Result;
@@ -21,6 +23,7 @@ pub struct PreprocessPipeline {
     binarize: BinarizeKernel,
     morphology: MorphologyKernel,
     config: PreprocessConfig,
+    arch: GpuArch,
 }
 
 /// Configuration for the preprocessing pipeline.
@@ -47,12 +50,16 @@ impl Default for PreprocessConfig {
 }
 
 impl PreprocessPipeline {
-    /// Initialize the preprocessing pipeline, loading all CUDA kernels.
+    /// Initialize the preprocessing pipeline, loading all CUDA kernels
+    /// for the detected (or specified) GPU architecture.
     pub fn new(ctx: &GpuContext, config: PreprocessConfig) -> Result<Self> {
-        let denoise = DenoiseKernel::new(ctx)?;
-        let deskew = DeskewKernel::new(ctx)?;
-        let binarize = BinarizeKernel::new(ctx)?;
-        let morphology = MorphologyKernel::new(ctx)?;
+        let arch = GpuArch::detect(ctx)?;
+        tracing::info!(arch = arch.name(), "initializing preprocessing for GPU");
+
+        let denoise = DenoiseKernel::new(ctx, arch)?;
+        let deskew = DeskewKernel::new(ctx, arch)?;
+        let binarize = BinarizeKernel::new(ctx, arch)?;
+        let morphology = MorphologyKernel::new(ctx, arch)?;
 
         Ok(Self {
             denoise,
@@ -60,7 +67,31 @@ impl PreprocessPipeline {
             binarize,
             morphology,
             config,
+            arch,
         })
+    }
+
+    /// Initialize with a specific GPU architecture (useful for testing).
+    pub fn with_arch(ctx: &GpuContext, config: PreprocessConfig, arch: GpuArch) -> Result<Self> {
+        tracing::info!(arch = arch.name(), "initializing preprocessing (explicit arch)");
+
+        let denoise = DenoiseKernel::new(ctx, arch)?;
+        let deskew = DeskewKernel::new(ctx, arch)?;
+        let binarize = BinarizeKernel::new(ctx, arch)?;
+        let morphology = MorphologyKernel::new(ctx, arch)?;
+
+        Ok(Self {
+            denoise,
+            deskew,
+            binarize,
+            morphology,
+            config,
+            arch,
+        })
+    }
+
+    pub fn arch(&self) -> GpuArch {
+        self.arch
     }
 
     /// Run the full preprocessing pipeline on a grayscale image.
