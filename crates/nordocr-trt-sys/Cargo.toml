@@ -1,0 +1,13 @@
+[package]
+name = "nordocr-trt-sys"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+# Enable bindgen generation from TensorRT headers.
+# Requires TensorRT to be installed on the build machine.
+generated = []
+
+[build-dependencies]
+bindgen = { workspace = true }

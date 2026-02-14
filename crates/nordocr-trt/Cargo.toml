@@ -1,0 +1,13 @@
+[package]
+name = "nordocr-trt"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nordocr-core = { workspace = true }
+nordocr-gpu = { workspace = true }
+nordocr-trt-sys = { workspace = true }
+cudarc = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+half = { workspace = true }

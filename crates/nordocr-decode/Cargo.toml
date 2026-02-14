@@ -1,0 +1,14 @@
+[package]
+name = "nordocr-decode"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nordocr-core = { workspace = true }
+nordocr-gpu = { workspace = true }
+cudarc = { workspace = true }
+image = { workspace = true }
+pdfium-render = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true }

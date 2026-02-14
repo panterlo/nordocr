@@ -1,0 +1,10 @@
+[package]
+name = "nordocr-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+half = { workspace = true }
+bytemuck = { workspace = true }

@@ -1,0 +1,34 @@
+# Build artifacts
+/target/
+**/*.ptx
+**/OUT_DIR/
+
+# Generated TensorRT engines (too large for git, must be rebuilt per-GPU)
+/models/*.engine
+/models/*.plan
+
+# Training outputs
+/training/**/output/
+/training/**/__pycache__/
+/training/**/*.pt
+/training/**/*.pth
+/training/**/*.onnx
+
+# Benchmark datasets (too large for git)
+/bench/datasets/*.png
+/bench/datasets/*.jpg
+/bench/datasets/*.pdf
+/bench/datasets/*.tiff
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env

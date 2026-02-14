@@ -1,0 +1,92 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nordocr-core",
+    "crates/nordocr-gpu",
+    "crates/nordocr-trt-sys",
+    "crates/nordocr-trt",
+    "crates/nordocr-preprocess",
+    "crates/nordocr-decode",
+    "crates/nordocr-detect",
+    "crates/nordocr-recognize",
+    "crates/nordocr-pipeline",
+    "crates/nordocr-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# Internal crates
+nordocr-core = { path = "crates/nordocr-core" }
+nordocr-gpu = { path = "crates/nordocr-gpu" }
+nordocr-trt-sys = { path = "crates/nordocr-trt-sys" }
+nordocr-trt = { path = "crates/nordocr-trt" }
+nordocr-preprocess = { path = "crates/nordocr-preprocess" }
+nordocr-decode = { path = "crates/nordocr-decode" }
+nordocr-detect = { path = "crates/nordocr-detect" }
+nordocr-recognize = { path = "crates/nordocr-recognize" }
+nordocr-pipeline = { path = "crates/nordocr-pipeline" }
+
+# CUDA
+cudarc = { version = "0.12", features = ["driver", "nvrtc"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP server
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Metrics
+metrics = "0.23"
+metrics-exporter-prometheus = "0.15"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Image handling
+image = "0.25"
+
+# PDF
+pdfium-render = "0.8"
+
+# Misc
+half = { version = "2", features = ["num-traits"] }
+bytemuck = { version = "1", features = ["derive"] }
+parking_lot = "0.12"
+bytes = "1"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+
+# Build deps
+bindgen = "0.70"
+
+# Test / bench
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
+[profile.bench]
+inherits = "release"
+debug = true

@@ -1,0 +1,17 @@
+[package]
+name = "nordocr-pipeline"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nordocr-core = { workspace = true }
+nordocr-gpu = { workspace = true }
+nordocr-preprocess = { workspace = true }
+nordocr-decode = { workspace = true }
+nordocr-detect = { workspace = true }
+nordocr-recognize = { workspace = true }
+cudarc = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }

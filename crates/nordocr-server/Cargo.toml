@@ -1,0 +1,31 @@
+[package]
+name = "nordocr-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "nordocr"
+path = "src/main.rs"
+
+[dependencies]
+nordocr-core = { workspace = true }
+nordocr-pipeline = { workspace = true }
+nordocr-gpu = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+clap = { workspace = true }
+bytes = { workspace = true }
+base64 = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+nordocr-trt = { workspace = true }
+parking_lot = { workspace = true }
