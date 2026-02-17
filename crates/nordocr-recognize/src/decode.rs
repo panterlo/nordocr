@@ -102,6 +102,46 @@ impl DecodedText {
             }
         }
     }
+
+    /// Strip leading and trailing whitespace from decoded text.
+    ///
+    /// Adjusts `char_confidences` and `char_positions` to match the trimmed text.
+    /// Handles the common case where the model reads bbox whitespace as a leading space.
+    pub fn strip_whitespace(&mut self) {
+        let chars: Vec<char> = self.text.chars().collect();
+        let n = chars.len();
+        if n == 0 {
+            return;
+        }
+
+        let start = chars.iter().position(|c| *c != ' ').unwrap_or(n);
+        let end = chars
+            .iter()
+            .rposition(|c| *c != ' ')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+
+        if start >= end {
+            self.text.clear();
+            self.char_confidences.clear();
+            self.char_positions.clear();
+            self.confidence = 0.0;
+            return;
+        }
+
+        if start == 0 && end == n {
+            return;
+        }
+
+        self.text = chars[start..end].iter().collect();
+        self.char_confidences = self.char_confidences[start..end].to_vec();
+        self.char_positions = self.char_positions[start..end].to_vec();
+
+        if !self.char_confidences.is_empty() {
+            let total_log: f32 = self.char_confidences.iter().map(|p| p.ln()).sum();
+            self.confidence = (total_log / self.char_confidences.len() as f32).exp();
+        }
+    }
 }
 
 /// Decodes PARSeq logits (GPU) into text strings.

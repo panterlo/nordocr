@@ -427,64 +427,121 @@ pub fn trim_edge_fragments(
                 return comp;
             }
 
-            // Compute gaps between word-clusters.
-            let mut word_gaps: Vec<(usize, usize)> = Vec::new(); // (gap_index, gap_width)
+            let mut trim_start = words[0].0;
+            let mut trim_end = words.last().unwrap().1;
+            let orig_start = trim_start;
+            let orig_end = trim_end;
+
+            // --- Check 1: Vertical center-of-mass (catches different-line fragments) ---
+            // When dilation bridges text from adjacent lines, the garbage fragment
+            // sits at a different vertical position within the merged bbox.
+            let vert_threshold = (bh as f32 / 8.0).max(4.0);
+
+            // Check leading fragment.
+            if words.len() >= 2 {
+                let first_w = words[0].1 - words[0].0;
+                let rest_start = words[1].0;
+                let rest_end = words.last().unwrap().1;
+                let rest_w = rest_end - rest_start;
+                if first_w <= max_fragment_width && rest_w >= 32 && first_w * 4 < rest_w {
+                    if let (Some(edge_cy), Some(body_cy)) = (
+                        vertical_center_of_mass(
+                            pre_dilation_binary, w, x0, y0,
+                            words[0].0, words[0].1, bh,
+                        ),
+                        vertical_center_of_mass(
+                            pre_dilation_binary, w, x0, y0,
+                            rest_start, rest_end, bh,
+                        ),
+                    ) {
+                        if (edge_cy - body_cy).abs() > vert_threshold {
+                            trim_start = words[1].0;
+                        }
+                    }
+                }
+            }
+
+            // Check trailing fragment.
+            if words.len() >= 2 {
+                let last = words.last().unwrap();
+                let last_w = last.1 - last.0;
+                let body_start = trim_start;
+                let body_end = words[words.len() - 2].1;
+                let body_w = body_end.saturating_sub(body_start);
+                if last_w <= max_fragment_width && body_w >= 32 && last_w * 4 < body_w {
+                    if let (Some(edge_cy), Some(body_cy)) = (
+                        vertical_center_of_mass(
+                            pre_dilation_binary, w, x0, y0,
+                            last.0, last.1, bh,
+                        ),
+                        vertical_center_of_mass(
+                            pre_dilation_binary, w, x0, y0,
+                            body_start, body_end, bh,
+                        ),
+                    ) {
+                        if (edge_cy - body_cy).abs() > vert_threshold {
+                            trim_end = words[words.len() - 2].1;
+                        }
+                    }
+                }
+            }
+
+            // --- Check 2: Outlier-gap-based trim (catches same-line edge fragments) ---
+            // Only for edges not already trimmed by vertical check.
+            let mut word_gaps: Vec<(usize, usize)> = Vec::new();
             for i in 0..words.len() - 1 {
                 let gap_w = words[i + 1].0 - words[i].1;
                 word_gaps.push((i, gap_w));
             }
 
-            // Find the widest gap between word-clusters.
             let (widest_idx, widest_gap) =
                 *word_gaps.iter().max_by_key(|(_, gw)| *gw).unwrap();
 
-            // Must be at least 4px to be meaningful.
-            if widest_gap < 4 {
-                return comp;
-            }
+            if widest_gap >= 4 {
+                let mut is_outlier = true;
+                let mut sorted_gaps: Vec<usize> =
+                    word_gaps.iter().map(|(_, gw)| *gw).collect();
+                sorted_gaps.sort_unstable();
 
-            // Sort gaps by width for percentile check.
-            let mut sorted_gaps: Vec<usize> = word_gaps.iter().map(|(_, gw)| *gw).collect();
-            sorted_gaps.sort_unstable();
-
-            // The widest gap must be an outlier — at least 1.5× the second-widest gap.
-            // This ensures it's a genuine inter-element boundary, not just
-            // normal variation in word spacing.
-            if sorted_gaps.len() >= 2 {
-                let second_widest = sorted_gaps[sorted_gaps.len() - 2];
-                if second_widest > 0 && widest_gap * 2 < second_widest * 3 {
-                    // widest < 1.5 × second_widest → not an outlier.
-                    return comp;
+                if sorted_gaps.len() >= 2 {
+                    let second_widest = sorted_gaps[sorted_gaps.len() - 2];
+                    if second_widest > 0 && widest_gap * 2 < second_widest * 3 {
+                        is_outlier = false;
+                    }
                 }
-            }
 
-            let mut trim_start = words[0].0;
-            let mut trim_end = words.last().unwrap().1;
+                if is_outlier {
+                    // Check leading fragment (only if not already trimmed).
+                    if trim_start == orig_start && widest_idx == 0 {
+                        let first_w = words[0].1 - words[0].0;
+                        let rest_w = words.last().unwrap().1 - words[1].0;
+                        if first_w <= max_fragment_width
+                            && rest_w >= 32
+                            && first_w * 4 < rest_w
+                        {
+                            trim_start = words[1].0;
+                        }
+                    }
 
-            // Check leading fragment: content to the left of the widest gap.
-            if widest_idx == 0 {
-                // The widest gap is between the first and second word-clusters.
-                let first_w = words[0].1 - words[0].0;
-                let rest_w = words.last().unwrap().1 - words[1].0;
-                if first_w <= max_fragment_width && rest_w >= 32 && first_w * 4 < rest_w {
-                    trim_start = words[1].0;
-                }
-            }
-
-            // Check trailing fragment: content to the right of the widest gap.
-            if widest_idx == words.len() - 2 {
-                // The widest gap is between the second-to-last and last word-clusters.
-                let last_w = words.last().unwrap().1 - words.last().unwrap().0;
-                let body_w = words[words.len() - 2].1 - trim_start;
-                if last_w <= max_fragment_width && body_w >= 32 && last_w * 4 < body_w {
-                    trim_end = words[words.len() - 2].1;
+                    // Check trailing fragment (only if not already trimmed).
+                    if trim_end == orig_end && widest_idx == words.len() - 2 {
+                        let last_w =
+                            words.last().unwrap().1 - words.last().unwrap().0;
+                        let body_w = words[words.len() - 2].1 - trim_start;
+                        if last_w <= max_fragment_width
+                            && body_w >= 32
+                            && last_w * 4 < body_w
+                        {
+                            trim_end = words[words.len() - 2].1;
+                        }
+                    }
                 }
             }
 
             // Apply trim if changed.
             let new_w = trim_end.saturating_sub(trim_start);
             if new_w >= 32
-                && (trim_start > words[0].0 || trim_end < words.last().unwrap().1)
+                && (trim_start > orig_start || trim_end < orig_end)
             {
                 comp.bbox = BBox::new(
                     (x0 + trim_start) as f32,
@@ -497,6 +554,37 @@ pub fn trim_edge_fragments(
             comp
         })
         .collect()
+}
+
+/// Compute the vertical center of mass of foreground pixels in a column range.
+///
+/// Returns the mean y-offset (relative to bbox top) of foreground pixels within
+/// columns `[col_start, col_end)` of the bbox starting at `(x0, y0)`.
+fn vertical_center_of_mass(
+    binary: &[u8],
+    full_width: usize,
+    x0: usize,
+    y0: usize,
+    col_start: usize,
+    col_end: usize,
+    bh: usize,
+) -> Option<f32> {
+    let mut sum_y = 0.0f64;
+    let mut count = 0u32;
+    for dy in 0..bh {
+        let row_start = (y0 + dy) * full_width + x0;
+        for dx in col_start..col_end {
+            if binary[row_start + dx] > 0 {
+                sum_y += dy as f64;
+                count += 1;
+            }
+        }
+    }
+    if count > 0 {
+        Some((sum_y / count as f64) as f32)
+    } else {
+        None
+    }
 }
 
 /// Union-find with path halving.

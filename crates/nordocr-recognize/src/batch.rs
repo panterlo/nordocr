@@ -125,9 +125,13 @@ impl RecognitionBatcher {
                 let orig_idx = batch.region_indices[i];
                 let region = &regions[orig_idx];
 
-                // Also trim trailing garbage by spatial gap analysis (catches
+                // Trim trailing garbage by spatial gap analysis (catches
                 // cases where adjacent content bleeds into the crop itself).
                 decoded_text.trim_trailing_by_position();
+
+                // Strip leading/trailing whitespace from decoded text.
+                // Handles cases where the model reads bbox whitespace as spaces.
+                decoded_text.strip_whitespace();
 
                 results[orig_idx] = Some(TextLine {
                     text: decoded_text.text,
