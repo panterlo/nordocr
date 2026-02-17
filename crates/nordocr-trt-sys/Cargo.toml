@@ -11,3 +11,4 @@ generated = []
 
 [build-dependencies]
 bindgen = { workspace = true }
+cc = "1"

@@ -4,4 +4,4 @@ pub mod runtime;
 
 pub use builder::{DlaConfig, Fp8CalibrationConfig, OptimizationProfile, TrtEngineBuilder};
 pub use graph::{CudaGraph, CudaGraphCapture};
-pub use runtime::{TrtDataType, TrtEngine, TrtExecutionContext, TrtRuntime};
+pub use runtime::{TensorBinding, TrtDataType, TrtEngine, TrtExecutionContext, TrtRuntime};

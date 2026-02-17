@@ -2,32 +2,40 @@ use serde::{Deserialize, Serialize};
 
 /// Detection model architecture.
 ///
-/// DBNet++ is the proven default. RTMDet is a newer single-stage detector
-/// that may be faster at comparable accuracy — benchmark both on your
-/// document test set before switching.
+/// Morphological is the default for scanned documents — CPU-based, no model needed.
+/// DBNet++ and RTMDet are neural alternatives requiring TensorRT engines.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum DetectModelArch {
-    /// DBNet++ with differentiable binarization. Proven on document benchmarks.
-    /// Single-pass, fully convolutional, no NMS needed.
+    /// CPU morphological detection: binarize → dilate → CCL → bbox filtering.
+    /// Ported from Ormeo.Document C# pipeline. No GPU model needed.
+    /// Best for clean scanned documents with horizontal text.
     #[default]
+    Morphological,
+    /// DBNet++ with differentiable binarization. Proven on document benchmarks.
+    /// Single-pass, fully convolutional, no NMS needed. Requires TRT engine.
     DBNetPP,
     /// RTMDet (Real-Time Models for Object Detection). MMLAB's latest
     /// single-stage detector. Potentially faster than DBNet++ with CSPNeXt
     /// backbone, but less tested on document text detection specifically.
-    /// Export: PyTorch → ONNX → TensorRT, same as DBNet++.
+    /// Export: PyTorch → ONNX → TensorRT, same as DBNet++. Requires TRT engine.
     RTMDet,
 }
 
 /// Recognition model architecture.
 ///
-/// PARSeq is the default for its parallel decoding speed. Newer
-/// alternatives may offer better accuracy on specific character classes.
+/// SVTRv2 is the default: CTC decoder with variable-width input, best for
+/// wide text lines in scanned documents. PARSeq is the alternative with
+/// fixed-width input and parallel autoregressive decoding.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum RecogModelArch {
-    /// PARSeq (Permutation AutoRegressive Sequence model). Non-autoregressive:
-    /// all character positions decoded in parallel. ~3-5x faster inference
-    /// than autoregressive models. Best overall speed/accuracy tradeoff.
+    /// SVTRv2 with CTC decoder. Variable-width input (stride 4), handles
+    /// arbitrarily wide text lines without padding waste. Trained at 1792px
+    /// max width for Nordic documents. CER 0.20%, accuracy 98.45%.
     #[default]
+    SVTRv2,
+    /// PARSeq (Permutation AutoRegressive Sequence model). Non-autoregressive:
+    /// all character positions decoded in parallel. Fixed 384px input width.
+    /// CER 0.14%, accuracy 99.07%. Better on short/medium lines.
     PARSeq,
     /// MAERec (Masked Autoencoder for scene text Recognition). Uses MAE
     /// pre-training for stronger visual features. May outperform PARSeq on
@@ -109,8 +117,9 @@ impl Default for DlaOffloadConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineConfig {
     /// Path to the detection TensorRT engine file.
+    /// Only needed when detect_model is DBNetPP or RTMDet.
     /// Must be built for the target GPU architecture.
-    pub detect_engine_path: String,
+    pub detect_engine_path: Option<String>,
     /// Path to the recognition TensorRT engine file.
     /// Must be built for the target GPU architecture.
     pub recognize_engine_path: String,
@@ -168,8 +177,8 @@ pub struct PipelineConfig {
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
-            detect_engine_path: "models/detect.engine".to_string(),
-            recognize_engine_path: "models/recognize.engine".to_string(),
+            detect_engine_path: None, // Not needed for Morphological detection
+            recognize_engine_path: "models/recognize_svtrv2_sm120.engine".to_string(),
 
             detect_model: DetectModelArch::default(),
             recognize_model: RecogModelArch::default(),
@@ -183,8 +192,8 @@ impl Default for PipelineConfig {
 
             recognize_max_batch: 64,
             recognize_input_height: 32,
-            recognize_max_input_width: 512,
-            recognize_max_seq_len: 64,
+            recognize_max_input_width: 1792,
+            recognize_max_seq_len: 448, // 1792 / 4 (SVTRv2 stride)
 
             num_streams: 4,
             gpu_pool_size: 256 * 1024 * 1024, // 256 MB
@@ -206,8 +215,8 @@ impl PipelineConfig {
     /// Smaller batch sizes to match Ada's SM count.
     pub fn a6000_ada() -> Self {
         Self {
-            detect_engine_path: "models/detect_sm89.engine".to_string(),
-            recognize_engine_path: "models/recognize_sm89.engine".to_string(),
+            detect_engine_path: None,
+            recognize_engine_path: "models/recognize_svtrv2_sm89.engine".to_string(),
             gpu_arch_override: Some("sm_89".to_string()),
             precision: InferencePrecision::FP16,
             detect_max_batch: 2,
@@ -225,8 +234,8 @@ impl PipelineConfig {
     /// DLA offload available but disabled by default (enable after benchmarking).
     pub fn rtx6000_pro_blackwell() -> Self {
         Self {
-            detect_engine_path: "models/detect_sm120.engine".to_string(),
-            recognize_engine_path: "models/recognize_sm120.engine".to_string(),
+            detect_engine_path: None,
+            recognize_engine_path: "models/recognize_svtrv2_sm120.engine".to_string(),
             gpu_arch_override: Some("sm_120".to_string()),
             precision: InferencePrecision::FP8,
             detect_max_batch: 8,

@@ -13,6 +13,7 @@ use std::process::Command;
 /// Override via: NORDOCR_CUDA_ARCHS="sm_89,sm_120"
 /// For dev-only builds: NORDOCR_CUDA_ARCHS="sm_89"
 const DEFAULT_ARCHS: &str = "sm_89,sm_120";
+const ALL_ARCHS: &[&str] = &["sm_89", "sm_120"];
 
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -25,6 +26,22 @@ fn main() {
     let archs: Vec<&str> = archs_str.split(',').map(|s| s.trim()).collect();
 
     println!("cargo:rerun-if-env-changed=NORDOCR_CUDA_ARCHS");
+
+    // Generate stub PTX for architectures we're NOT compiling,
+    // so include_str! always finds a file.
+    for kernel in &kernels {
+        for arch in ALL_ARCHS {
+            if !archs.contains(arch) {
+                let safe_arch = arch.replace("sm_", "sm");
+                let ptx_file = out_dir.join(format!("{kernel}_{safe_arch}.ptx"));
+                std::fs::write(
+                    &ptx_file,
+                    format!("// STUB: {kernel}.cu not compiled for {arch} (not in NORDOCR_CUDA_ARCHS)\n"),
+                )
+                .unwrap();
+            }
+        }
+    }
 
     for kernel in &kernels {
         let cu_file = kernels_dir.join(format!("{kernel}.cu"));

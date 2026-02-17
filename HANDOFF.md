@@ -15,15 +15,22 @@ CUDA kernels are compiled as **fat binaries** containing native code for both ar
 
 ## Current State
 
-**Scaffolding complete, not yet compiled.** All crate structures, types, traits, API surfaces, CUDA kernels, and pipeline wiring are in place. The code was written on a Windows machine without Rust or CUDA — it has never been through `cargo check`.
+**All 10 crates compile (`cargo check` clean on sm_120).** First compilation pass completed on the Blackwell production server (2x RTX 6000 PRO Blackwell, CUDA 13.0, Driver 580.95.05). All CUDA kernels compile to PTX + fatbin. Warnings only — no errors.
+
+### Compilation verified on
+
+| Machine | GPUs | CUDA | Driver | Rust | Status |
+|---|---|---|---|---|---|
+| Blackwell prod | 2x RTX 6000 PRO Blackwell | 13.0 | 580.95.05 | 1.93.1 | `cargo check` clean |
+| Ada dev | A6000 Ada | TBD | TBD | TBD | Not yet tested |
 
 ### What exists and is substantive
 
 - **nordocr-core** — fully implemented types (`BBox`, `TextLine`, `PageResult`, `Polygon`, `FileInput`, etc.), error types, `PipelineStage` trait
-- **nordocr-gpu** — `GpuContext`, `GpuMemoryPool` (slab allocator avoiding cudaMalloc during inference), `GpuBuffer<T>` (typed GPU memory wrapper), `StreamPool`
+- **nordocr-gpu** — `GpuContext`, `GpuMemoryPool` (slab allocator avoiding cudaMalloc during inference), `GpuBuffer<T>` (typed GPU memory wrapper), `StreamPool`. **Uses cudarc 0.19 API** (`CudaContext` + `CudaStream`).
 - **nordocr-trt-sys** — bindgen build.rs (gated behind `generated` feature flag) + stub types that compile without TensorRT headers
 - **nordocr-trt** — safe wrappers: `TrtRuntime`, `TrtEngine`, `TrtExecutionContext`, `TrtEngineBuilder` (FP8/FP4/sparsity config), `CudaGraph` capture/replay
-- **nordocr-preprocess** — 4 CUDA kernels (.cu files with real algorithms) + Rust wrappers + `PreprocessPipeline` orchestrating denoise→deskew→binarize→morphology. **Multi-arch build**: compiles PTX for both sm_89 and sm_120, plus fat binaries. Runtime GPU detection via `GpuArch::detect()`.
+- **nordocr-preprocess** — 4 CUDA kernels (.cu files with real algorithms) + Rust wrappers + `PreprocessPipeline` orchestrating denoise→deskew→binarize→morphology. **Multi-arch build**: compiles PTX for target arch, generates stubs for others. Runtime GPU detection via `GpuArch::detect()`.
 - **nordocr-decode** — `ImageDecoder` (nvJPEG path + CPU fallback), `PdfDecoder` (pdfium-render), unified `Decoder`
 - **nordocr-detect** — `DetectionEngine` (TensorRT), `DetectionPostprocessor` (prob map → bboxes), `DetectionBatcher`
 - **nordocr-recognize** — `RecognitionEngine` (TensorRT), width-sorted `RecognitionBatcher`, `TokenDecoder` (softmax + argmax), full Nordic `charset` with tests
@@ -43,65 +50,78 @@ Every function that actually calls CUDA or TensorRT APIs has a comment block sho
 
 These are the integration points that need real FFI calls once CUDA is available.
 
-## First Steps on the Target Machine
+### Fixes applied during first compilation (sm_120)
 
-### 1. Install prerequisites
+These are already done — listed for reference so you don't re-investigate:
+
+| Issue | Fix applied |
+|---|---|
+| cudarc 0.12 doesn't support CUDA 13.0 | Upgraded to cudarc 0.19 with `cuda-13000` feature |
+| `CudaDevice` removed in cudarc 0.19 | `CudaDevice` → `CudaContext`, allocations via `CudaStream` not device |
+| `DevicePtr::device_ptr()` changed signature | Now takes `&CudaStream`, returns `(ptr, SyncOnDrop)` — scope the borrow guard |
+| `device.htod_sync_copy()` removed | → `stream.clone_htod()` |
+| `device.alloc_zeros()` removed | → `stream.alloc_zeros()` |
+| `GpuBuffer::from_cuda_slice` needs stream | Added `stream` param, caches raw pointer at creation time |
+| `nvidia-dali` workspace dep `optional = true` | Removed — `optional` not valid on workspace deps |
+| `half::f16` missing `bytemuck::Pod` impl | Added `bytemuck` feature to `half` workspace dep |
+| `axum::Multipart` not found | Added `multipart` feature to `axum` workspace dep |
+| Unicode curly quotes in charset.rs | `'` `'` → `\u{2018}` `\u{2019}` escape sequences |
+| Missing sm_89 PTX when building sm_120-only | build.rs now generates stubs for non-compiled architectures |
+
+## Building on the Ada Machine (sm_89)
+
+### 1. Prerequisites
 
 ```bash
-# Rust
+# Rust (if not already installed)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Verify CUDA
-nvcc --version          # need CUDA 12.x
-nvidia-smi              # confirm GPU visible (A6000 Ada or RTX 6000 PRO Blackwell)
+# CUDA must be on PATH — adjust path for your CUDA version
+export PATH=/usr/local/cuda/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
 
-# TensorRT (for full build with generated bindings)
-apt install libnvinfer-dev libnvinfer-plugin-dev  # or from NVIDIA .deb
+# Verify
+nvcc --version          # need CUDA 12.x+
+nvidia-smi              # confirm A6000 Ada visible
+rustc --version         # need 1.75+
 ```
 
-### 2. First compilation pass
+### 2. Build
 
 ```bash
 cd nordocr
 
-# This will compile everything except TensorRT bindgen (stub mode).
-# nvcc compiles .cu → .ptx for sm_89 + sm_120, plus fat binaries.
-# If nvcc is not found, build.rs creates stub .ptx files.
+# Build for Ada only (faster — skips Blackwell PTX compilation)
+NORDOCR_CUDA_ARCHS="sm_89" cargo check
+
+# Build for both architectures (fat binary, default)
 cargo check
 
-# Fix whatever comes up — expect mostly minor type mismatches,
-# missing trait imports, lifetime issues. The structure is sound
-# but hasn't been through the compiler yet.
+# Build for Blackwell only
+NORDOCR_CUDA_ARCHS="sm_120" cargo check
 ```
 
-**To compile CUDA kernels for only your dev GPU** (faster builds):
-
-```bash
-NORDOCR_CUDA_ARCHS="sm_89" cargo check    # A6000 Ada only
-NORDOCR_CUDA_ARCHS="sm_120" cargo check   # RTX 6000 PRO Blackwell only
-NORDOCR_CUDA_ARCHS="sm_89,sm_120" cargo check  # both (default)
+If your CUDA version is 12.x, the cudarc `cuda-13000` feature may fail. Change it in `Cargo.toml`:
+```toml
+# For CUDA 12.6:
+cudarc = { version = "0.19", features = ["driver", "nvrtc", "cuda-12060"] }
+# For CUDA 12.8:
+cudarc = { version = "0.19", features = ["driver", "nvrtc", "cuda-12080"] }
 ```
 
-### 3. Known things that will need fixing
+Available CUDA version features: `cuda-11040` through `cuda-13010`. Use `cuda-version-from-build-system` for auto-detection (may not work on all setups).
 
-| Issue | Where | What to do |
-|---|---|---|
-| `cudarc` API mismatches | `nordocr-gpu/src/*.rs` | Check cudarc 0.12 docs — method names and generics may differ from what's written |
-| `CudaStream` type | `nordocr-gpu/src/stream.rs` | cudarc's stream API may use `CudaStream` differently than assumed; adapt |
-| `DevicePtr` trait | `nordocr-gpu/src/buffer.rs`, `memory.rs` | Verify `*slice.device_ptr()` syntax matches cudarc 0.12 |
-| `image` crate API | `nordocr-decode/src/image.rs` | `image` 0.25 API for `load_from_memory`, `to_luma8` — should be fine but verify |
-| `axum` extractor types | `nordocr-server/src/api.rs` | axum 0.7 multipart — verify `Multipart` import path |
-| `metrics` crate API | `nordocr-server/src/api.rs`, `main.rs` | `metrics` 0.23 + `metrics-exporter-prometheus` 0.15 — verify builder API |
-| `half::f16` arithmetic | `nordocr-recognize/src/decode.rs` | `f32::from(f16)` should work with `half` 2.x `num-traits` feature |
-| `pdfium-render` | `nordocr-decode/src/pdf.rs` | Needs pdfium binary at runtime; the whole module is behind a `Result::Err` stub |
+### 3. Remaining warnings
+
+All remaining compiler output is **warnings only** (unused imports, unused fields, unused variables). These are expected — the placeholder code references types it doesn't yet use. Don't spend time fixing these until wiring up real implementations.
 
 ### 4. Wire up real CUDA calls
 
-The highest-value work after getting `cargo check` clean:
+The highest-value work now that `cargo check` is clean:
 
-1. **nordocr-gpu**: Make `GpuContext::new`, `GpuMemoryPool::alloc/free`, `StreamPool` work with real cudarc calls. This unblocks everything.
+1. **nordocr-gpu**: Make `GpuContext::new`, `GpuMemoryPool::alloc/free`, `StreamPool` work with real cudarc calls. The cudarc 0.19 migration is done — the types are correct, but the actual CUDA operations are placeholders. This unblocks everything.
 
-2. **nordocr-preprocess**: Load compiled PTX via `cudarc`, launch kernels. The `.cu` files have real algorithms — the Rust wrappers just need real `launch!` calls. The `GpuArch` detection in `gpu_arch.rs` needs the real cudarc device attribute query wired up.
+2. **nordocr-preprocess**: Load compiled PTX via `cudarc`, launch kernels. The `.cu` files have real algorithms — the Rust wrappers just need real `launch!` calls. The `GpuArch` detection in `gpu_arch.rs` can now use `ctx.compute_capability()` (cudarc 0.19 API).
 
 3. **nordocr-trt**: Replace placeholder handles with actual TensorRT C API calls through `nordocr-trt-sys`. Enable the `generated` feature to get real bindgen output:
    ```bash
@@ -165,22 +185,47 @@ Image bytes ──► GPU Decode ──► Preprocess ──► Detect ──►
 
 Everything between the two arrows stays in GPU memory. The `GpuMemoryPool` pre-allocates slabs to avoid cudaMalloc during inference.
 
+## cudarc 0.19 API Quick Reference
+
+The codebase uses cudarc 0.19 (not 0.12). Key types:
+
+```rust
+// Device/context
+let ctx: Arc<CudaContext> = CudaContext::new(ordinal)?;
+let (major, minor) = ctx.compute_capability()?;
+
+// Streams
+let stream: Arc<CudaStream> = ctx.default_stream();
+let stream2: Arc<CudaStream> = ctx.new_stream()?;
+
+// Allocation (on stream, not device)
+let data: CudaSlice<f32> = stream.alloc_zeros(1024)?;
+let data: CudaSlice<u8> = stream.clone_htod(&host_vec)?;
+
+// Device pointer (needs stream, returns borrow guard)
+let raw_ptr = {
+    let (ptr, _guard) = DevicePtr::device_ptr(&slice, &stream);
+    ptr as u64
+}; // _guard dropped here, releasing borrow
+
+// Synchronization
+stream.synchronize()?;
+ctx.synchronize()?;
+```
+
 ## Multi-GPU-Architecture Build
 
 ```
 build.rs (nordocr-preprocess)
   │
-  ├── nvcc --fatbin --generate-code=arch=compute_89,code=sm_89
-  │                 --generate-code=arch=compute_120,code=sm_120
-  │                 --generate-code=arch=compute_89,code=compute_89   ← PTX for JIT
-  │                 --generate-code=arch=compute_120,code=compute_120 ← PTX for JIT
-  │   → binarize.fatbin  (runs on both GPUs, driver picks best code)
+  ├── For each arch in NORDOCR_CUDA_ARCHS (default: sm_89,sm_120):
+  │     nvcc --ptx → {kernel}_{arch}.ptx
   │
-  ├── nvcc --ptx --generate-code=arch=compute_89,code=sm_89
-  │   → binarize_sm89.ptx  (Ada-specific, used if fatbin not available)
+  ├── For archs NOT in NORDOCR_CUDA_ARCHS:
+  │     generates stub PTX ("// STUB: ...")
   │
-  └── nvcc --ptx --generate-code=arch=compute_120,code=sm_120
-      → binarize_sm120.ptx  (Blackwell-specific)
+  └── nvcc --fatbin (all requested archs)
+      → {kernel}.fatbin  (driver picks best code at load time)
 
 Runtime (gpu_arch.rs):
   GpuArch::detect() → queries CUDA device compute capability
@@ -194,7 +239,7 @@ Override: `NORDOCR_TARGET_ARCH=sm_89` or `NORDOCR_TARGET_ARCH=sm_120`
 
 ```
 nordocr-core          (no deps — shared types/errors)
-  ├── nordocr-gpu     (cudarc — GPU context, memory, streams)
+  ├── nordocr-gpu     (cudarc 0.19 — GPU context, memory, streams)
   ├── nordocr-trt-sys (bindgen — raw TensorRT FFI)
   │     └── nordocr-trt (safe TensorRT wrappers)
   ├── nordocr-preprocess (CUDA kernels via cudarc + gpu_arch multi-target)

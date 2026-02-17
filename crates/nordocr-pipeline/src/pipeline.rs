@@ -1,26 +1,29 @@
 use std::path::Path;
 use std::time::Instant;
 
-use nordocr_core::{FileInput, OcrError, PageResult, Result, TextRegion, TimingInfo};
+use nordocr_core::{FileInput, OcrError, PageResult, RawImage, Result, TextRegion, TimingInfo};
 use nordocr_decode::Decoder;
-use nordocr_detect::{DetectionBatcher, DetectionEngine, DetectionPostprocessor};
+use nordocr_detect::{DetectionBatcher, DetectionEngine, DetectionPostprocessor, MorphologicalDetector};
 use nordocr_gpu::{GpuContext, GpuContextConfig};
 use nordocr_preprocess::{PreprocessConfig, PreprocessPipeline};
 use nordocr_recognize::{RecognitionBatcher, RecognitionEngine};
 
-use crate::config::PipelineConfig;
+use crate::config::{DetectModelArch, PipelineConfig};
 use crate::scheduler::PageScheduler;
 
-/// The full OCR pipeline: decode → preprocess → detect → recognize.
+/// The full OCR pipeline: decode → detect → recognize.
 ///
-/// All intermediate data stays on GPU. Only two CPU↔GPU transfers:
-/// 1. Raw image bytes → GPU (input)
-/// 2. Recognized text → CPU (output)
+/// Detection backend: either morphological (CPU) or neural (TRT).
+enum DetectionBackend {
+    Morphological(MorphologicalDetector),
+    Neural(DetectionBatcher),
+}
+
 pub struct OcrPipeline {
     gpu: GpuContext,
     decoder: Decoder,
     preprocess: Option<PreprocessPipeline>,
-    detector: DetectionBatcher,
+    detection: DetectionBackend,
     recognizer: RecognitionBatcher,
     scheduler: PageScheduler,
     config: PipelineConfig,
@@ -28,22 +31,17 @@ pub struct OcrPipeline {
 
 impl OcrPipeline {
     /// Build the pipeline from configuration.
-    ///
-    /// This initializes the GPU, loads models, and warms up the engines.
     pub fn build(config: PipelineConfig) -> Result<Self> {
         tracing::info!("building OCR pipeline");
 
-        // Initialize GPU context.
         let gpu = GpuContext::new(GpuContextConfig {
             device_ordinal: 0,
             pool_size: config.gpu_pool_size,
             stream_count: config.num_streams,
         })?;
 
-        // Decoder.
         let decoder = Decoder::new(&gpu)?;
 
-        // Preprocessor (optional).
         let preprocess = if config.enable_preprocess {
             Some(PreprocessPipeline::new(
                 &gpu,
@@ -53,20 +51,31 @@ impl OcrPipeline {
             None
         };
 
-        // Detection.
-        let detect_engine = DetectionEngine::load(
-            &gpu,
-            Path::new(&config.detect_engine_path),
-            config.detect_max_batch,
-            config.detect_input_height,
-            config.detect_input_width,
-        )?;
-        let detect_postproc = DetectionPostprocessor::new()
-            .with_threshold(config.detect_threshold)
-            .with_min_area(config.detect_min_area);
-        let detector = DetectionBatcher::new(detect_engine, detect_postproc);
+        let detection = match config.detect_model {
+            DetectModelArch::Morphological => {
+                tracing::info!("using morphological text detection (CPU)");
+                DetectionBackend::Morphological(MorphologicalDetector::default())
+            }
+            DetectModelArch::DBNetPP | DetectModelArch::RTMDet => {
+                let engine_path = config.detect_engine_path.as_deref().ok_or_else(|| {
+                    OcrError::InvalidInput(
+                        "detect_engine_path required for neural detection".into(),
+                    )
+                })?;
+                let detect_engine = DetectionEngine::load(
+                    &gpu,
+                    Path::new(engine_path),
+                    config.detect_max_batch,
+                    config.detect_input_height,
+                    config.detect_input_width,
+                )?;
+                let detect_postproc = DetectionPostprocessor::new()
+                    .with_threshold(config.detect_threshold)
+                    .with_min_area(config.detect_min_area);
+                DetectionBackend::Neural(DetectionBatcher::new(detect_engine, detect_postproc))
+            }
+        };
 
-        // Recognition.
         let recog_engine = RecognitionEngine::load(
             &gpu,
             Path::new(&config.recognize_engine_path),
@@ -77,7 +86,6 @@ impl OcrPipeline {
         )?;
         let recognizer = RecognitionBatcher::new(recog_engine, config.recognize_max_batch);
 
-        // Scheduler.
         let scheduler = PageScheduler::new(config.num_streams);
 
         tracing::info!("OCR pipeline ready");
@@ -86,7 +94,7 @@ impl OcrPipeline {
             gpu,
             decoder,
             preprocess,
-            detector,
+            detection,
             recognizer,
             scheduler,
             config,
@@ -102,43 +110,32 @@ impl OcrPipeline {
         let total_start = Instant::now();
         let mut timing = TimingInfo::default();
 
-        // Stage 1: Decode input to GPU buffers.
+        // Stage 1: Decode input to CPU RGB images.
+        // For morphological detection, we need CPU data; for neural, we'd use GPU.
+        // Using CPU decode for both paths since recognition also needs CPU crops.
         let decode_start = Instant::now();
-        let pages = self.decoder.decode(&self.gpu, input, page_filter)?;
+        let page_images = self.decoder.decode_cpu(input, page_filter)?;
         timing.decode_ms = decode_start.elapsed().as_secs_f32() * 1000.0;
 
-        if pages.is_empty() {
+        if page_images.is_empty() {
             return Ok((Vec::new(), timing));
         }
 
-        tracing::debug!(num_pages = pages.len(), "decoded input");
+        tracing::debug!(num_pages = page_images.len(), "decoded input");
 
-        // Stage 2: Preprocess (denoise, deskew, binarize).
-        let preproc_start = Instant::now();
-        let preprocessed: Vec<_> = if let Some(ref preproc) = self.preprocess {
-            pages
-                .iter()
-                .map(|(buf, w, h)| preproc.execute(&self.gpu, buf, *w, *h))
-                .collect::<Result<Vec<_>>>()?
-        } else {
-            // Skip preprocessing — use decoded images directly.
-            // In production: convert u8 → f16 for detection input.
-            Vec::new()
-        };
-        timing.preprocess_ms = preproc_start.elapsed().as_secs_f32() * 1000.0;
-
-        // Stage 3: Text detection.
+        // Stage 2: Text detection.
         let detect_start = Instant::now();
-        // In production:
-        //   1. Resize preprocessed images to detection model input size.
-        //   2. Normalize (ImageNet mean/std).
-        //   3. Convert to FP16 batch tensor.
-        //   4. Run detection on batches.
-        //   let regions_per_page = self.detector.detect_pages(&self.gpu, &batch_tensors, stream)?;
-        let regions_per_page: Vec<Vec<TextRegion>> = vec![Vec::new(); pages.len()];
+        let regions_per_page = self.detect_all(&page_images)?;
         timing.detect_ms = detect_start.elapsed().as_secs_f32() * 1000.0;
 
-        // Stage 4: Collect all text regions and run recognition.
+        let total_regions: usize = regions_per_page.iter().map(|r| r.len()).sum();
+        tracing::debug!(
+            total_regions,
+            pages = page_images.len(),
+            "detection complete"
+        );
+
+        // Stage 3: Collect all text regions and run recognition.
         let recog_start = Instant::now();
         let all_regions: Vec<TextRegion> = regions_per_page
             .iter()
@@ -146,14 +143,15 @@ impl OcrPipeline {
             .collect();
 
         let text_lines = if !all_regions.is_empty() {
-            self.recognizer.recognize_all(&self.gpu, &all_regions, 0)?
+            self.recognizer
+                .recognize_all(&self.gpu, &all_regions, &page_images)?
         } else {
             Vec::new()
         };
         timing.recognize_ms = recog_start.elapsed().as_secs_f32() * 1000.0;
 
-        // Stage 5: Assemble page results.
-        let mut page_results = Vec::with_capacity(pages.len());
+        // Stage 4: Assemble page results.
+        let mut page_results = Vec::with_capacity(page_images.len());
         let mut line_cursor = 0;
 
         for (page_idx, regions) in regions_per_page.iter().enumerate() {
@@ -190,7 +188,6 @@ impl OcrPipeline {
             pages = page_results.len(),
             total_ms = timing.total_ms,
             decode_ms = timing.decode_ms,
-            preproc_ms = timing.preprocess_ms,
             detect_ms = timing.detect_ms,
             recog_ms = timing.recognize_ms,
             "pipeline complete"
@@ -199,23 +196,40 @@ impl OcrPipeline {
         Ok((page_results, timing))
     }
 
+    /// Run text detection on all pages.
+    fn detect_all(&mut self, page_images: &[RawImage]) -> Result<Vec<Vec<TextRegion>>> {
+        match &self.detection {
+            DetectionBackend::Morphological(detector) => {
+                let mut all_regions = Vec::with_capacity(page_images.len());
+                for (page_idx, page) in page_images.iter().enumerate() {
+                    let regions =
+                        detector.detect(&page.data, page.width, page.height, page_idx as u32);
+                    tracing::debug!(
+                        page = page_idx,
+                        regions = regions.len(),
+                        "morphological detection"
+                    );
+                    all_regions.push(regions);
+                }
+                Ok(all_regions)
+            }
+            DetectionBackend::Neural(_batcher) => {
+                // Neural detection requires GPU-preprocessed images.
+                // For now, return an error since we don't have GPU tensors here.
+                Err(OcrError::InvalidInput(
+                    "neural detection requires GPU preprocessing (not yet wired with CPU decode path)".into(),
+                ))
+            }
+        }
+    }
+
     /// Warm up the pipeline by running a dummy inference.
-    ///
-    /// This triggers TensorRT engine warmup, JIT compilation, and
-    /// ensures GPU memory pools are primed.
     pub fn warmup(&mut self) -> Result<()> {
         tracing::info!("warming up pipeline");
 
-        // Create a small dummy image.
         let dummy = vec![128u8; 100 * 100];
-        let input = FileInput::Image(
-            // Encode as a minimal valid PNG in memory.
-            // In production: just allocate a GPU buffer directly.
-            dummy,
-        );
+        let input = FileInput::Image(dummy);
 
-        // Run through the pipeline (will fail at decode for raw bytes,
-        // but that's fine — the GPU context is warmed up).
         let _ = self.process(&input, None);
 
         self.gpu.synchronize()?;

@@ -34,13 +34,53 @@ pub static CHARSET: &[char] = &[
     '-', '.', '/', ':', ';', '<', '=', '>', '?', '@', '[', '\\', ']',
     '^', '_', '`', '{', '|', '}', '~',
     // Additional Nordic/European punctuation.
-    '§', '°', '€', '£', '«', '»', '–', '—', ''', ''', '"', '"',
+    '§', '°', '€', '£', '«', '»', '–', '—', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}',
 ];
 
 pub const PAD_TOKEN: usize = 0;
 pub const UNK_TOKEN: usize = 1;
 pub const EOS_TOKEN: usize = 2;
 pub const CHARSET_SIZE: usize = 126; // update if CHARSET changes
+
+// --- CTC charset for SVTRv2 ---
+// CTC uses blank at index 0, then 125 characters from nordic_dict.txt at indices 1-125.
+// Total classes: 126 (blank + 125 chars).
+pub const CTC_BLANK: usize = 0;
+pub const CTC_NUM_CLASSES: usize = 126;
+
+/// CTC character set (indices 1-125). Index 0 is the CTC blank token.
+/// Order matches `training/recognize/nordic_dict.txt`.
+pub static CTC_CHARSET: &[char] = &[
+    // Digits (CTC indices 1-10)
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+    // Uppercase (CTC indices 11-36)
+    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
+    'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+    // Lowercase (CTC indices 37-62)
+    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+    'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+    // Nordic uppercase (CTC indices 63-70)
+    'Å', 'Ä', 'Ö', 'Ø', 'Æ', 'Ð', 'Þ', 'Ü',
+    // Nordic lowercase (CTC indices 71-78)
+    'å', 'ä', 'ö', 'ø', 'æ', 'ð', 'þ', 'ü',
+    // Punctuation (CTC indices 79-111)
+    ' ', '!', '"', '#', '$', '%', '&', '\'', '(', ')', '*', '+', ',',
+    '-', '.', '/', ':', ';', '<', '=', '>', '?', '@', '[', '\\', ']',
+    '^', '_', '`', '{', '|', '}', '~',
+    // Additional symbols (CTC indices 112-125)
+    '§', '°', '€', '£', '«', '»', '–', '—',
+    '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}',
+    '±', '×',
+];
+
+/// Map a CTC token index to a character. Returns None for blank (0) or out-of-range.
+pub fn ctc_token_to_char(token: usize) -> Option<char> {
+    if token == CTC_BLANK || token > CTC_CHARSET.len() {
+        None
+    } else {
+        Some(CTC_CHARSET[token - 1])
+    }
+}
 
 /// Look up the character for a given token index.
 pub fn token_to_char(token: usize) -> Option<char> {

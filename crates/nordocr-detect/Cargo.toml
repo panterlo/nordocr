@@ -11,3 +11,7 @@ cudarc = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 half = { workspace = true }
+
+[dev-dependencies]
+tiff = { workspace = true }
+image = { workspace = true }

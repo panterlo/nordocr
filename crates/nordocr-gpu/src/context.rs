@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cudarc::driver::CudaDevice;
+use cudarc::driver::{CudaContext, CudaStream};
 
 use nordocr_core::{OcrError, Result};
 
@@ -17,7 +17,8 @@ const DEFAULT_STREAM_COUNT: usize = 4;
 ///
 /// Created once at startup and shared across all pipeline stages.
 pub struct GpuContext {
-    pub device: Arc<CudaDevice>,
+    pub ctx: Arc<CudaContext>,
+    pub default_stream: Arc<CudaStream>,
     pub memory_pool: GpuMemoryPool,
     pub stream_pool: StreamPool,
     device_ordinal: usize,
@@ -53,14 +54,16 @@ impl GpuContext {
             "initializing GPU context"
         );
 
-        let device = CudaDevice::new(config.device_ordinal)
+        let ctx = CudaContext::new(config.device_ordinal)
             .map_err(|e| OcrError::Cuda(format!("device init failed: {e}")))?;
 
-        let memory_pool = GpuMemoryPool::new(device.clone(), config.pool_size)?;
-        let stream_pool = StreamPool::new(device.clone(), config.stream_count)?;
+        let default_stream = ctx.default_stream();
+        let memory_pool = GpuMemoryPool::new(ctx.clone(), default_stream.clone(), config.pool_size)?;
+        let stream_pool = StreamPool::new(ctx.clone(), config.stream_count)?;
 
         Ok(Self {
-            device,
+            ctx,
+            default_stream,
             memory_pool,
             stream_pool,
             device_ordinal: config.device_ordinal,
@@ -78,7 +81,7 @@ impl GpuContext {
 
     /// Synchronize the device (wait for all GPU work to complete).
     pub fn synchronize(&self) -> Result<()> {
-        self.device
+        self.ctx
             .synchronize()
             .map_err(|e| OcrError::Cuda(format!("device sync failed: {e}")))
     }

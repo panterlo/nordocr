@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 nordocr-core = { workspace = true }
 cudarc = { workspace = true }
+bytemuck = { workspace = true }
 parking_lot = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

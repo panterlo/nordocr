@@ -2,7 +2,7 @@ use half::f16;
 use nordocr_core::{OcrError, Result};
 use nordocr_gpu::{GpuBuffer, GpuContext};
 
-use crate::charset::{self, CHARSET_SIZE, EOS_TOKEN, PAD_TOKEN};
+use crate::charset::{self, CHARSET_SIZE, CTC_BLANK, CTC_NUM_CLASSES, EOS_TOKEN, PAD_TOKEN};
 
 /// Decoded text with per-character confidence scores.
 #[derive(Debug, Clone)]
@@ -107,6 +107,124 @@ impl TokenDecoder {
     }
 }
 
+/// Decodes SVTRv2 CTC output into text strings.
+///
+/// SVTRv2 outputs probabilities of shape [batch, T, num_classes] where
+/// T = input_width / stride (stride=4). Uses CTC decoding: collapse
+/// repeated tokens and skip blanks (index 0).
+pub struct CtcDecoder {
+    num_classes: usize,
+}
+
+impl CtcDecoder {
+    pub fn new() -> Self {
+        Self {
+            num_classes: CTC_NUM_CLASSES,
+        }
+    }
+
+    /// Decode a batch of CTC probabilities from GPU to text strings.
+    ///
+    /// `probs` contains [batch_size, seq_len, num_classes] as f16.
+    /// `seq_len` is the temporal dimension (input_width / stride).
+    pub fn decode_batch(
+        &self,
+        ctx: &GpuContext,
+        probs: &GpuBuffer<f16>,
+        batch_size: u32,
+        seq_len: u32,
+    ) -> Result<Vec<DecodedText>> {
+        let _ = (ctx, probs);
+
+        let mut results = Vec::with_capacity(batch_size as usize);
+
+        for b in 0..batch_size {
+            let decoded = self.decode_single_ctc(b, &[], seq_len)?;
+            results.push(decoded);
+        }
+
+        Ok(results)
+    }
+
+    /// Decode CTC output from CPU f16 probabilities.
+    ///
+    /// `probs_cpu` is the full [batch, seq_len, num_classes] tensor flattened.
+    /// Each batch element has `seq_len * num_classes` values.
+    pub fn decode_cpu(
+        &self,
+        probs_cpu: &[f16],
+        batch_size: u32,
+        seq_len: u32,
+    ) -> Result<Vec<DecodedText>> {
+        let stride = seq_len as usize * self.num_classes;
+        let mut results = Vec::with_capacity(batch_size as usize);
+
+        for b in 0..batch_size {
+            let offset = b as usize * stride;
+            let end = offset + stride;
+            let batch_probs = if end <= probs_cpu.len() {
+                &probs_cpu[offset..end]
+            } else {
+                &[]
+            };
+            let decoded = self.decode_single_ctc(b, batch_probs, seq_len)?;
+            results.push(decoded);
+        }
+
+        Ok(results)
+    }
+
+    fn decode_single_ctc(
+        &self,
+        _batch_index: u32,
+        probs_cpu: &[f16], // [seq_len, num_classes]
+        seq_len: u32,
+    ) -> Result<DecodedText> {
+        let mut text = String::new();
+        let mut char_confidences = Vec::new();
+        let mut total_log_prob = 0.0f32;
+        let mut num_chars = 0;
+        let mut prev_token: usize = CTC_BLANK;
+
+        for t in 0..seq_len as usize {
+            let offset = t * self.num_classes;
+
+            let (best_token, best_prob) = if offset + self.num_classes <= probs_cpu.len() {
+                let slice = &probs_cpu[offset..offset + self.num_classes];
+                softmax_argmax(slice)
+            } else {
+                (CTC_BLANK, 1.0)
+            };
+
+            // CTC decoding: skip blanks and repeated tokens.
+            if best_token == CTC_BLANK || best_token == prev_token {
+                prev_token = best_token;
+                continue;
+            }
+            prev_token = best_token;
+
+            if let Some(c) = charset::ctc_token_to_char(best_token) {
+                text.push(c);
+                char_confidences.push(best_prob);
+                total_log_prob += best_prob.ln();
+                num_chars += 1;
+            }
+        }
+
+        let confidence = if num_chars > 0 {
+            (total_log_prob / num_chars as f32).exp()
+        } else {
+            0.0
+        };
+
+        Ok(DecodedText {
+            text,
+            confidence,
+            char_confidences,
+        })
+    }
+}
+
 /// Compute softmax and return (argmax_index, max_probability).
 fn softmax_argmax(logits: &[f16]) -> (usize, f32) {
     if logits.is_empty() {
@@ -158,5 +276,64 @@ mod tests {
         let (idx, prob) = softmax_argmax(&[]);
         assert_eq!(idx, 0);
         assert_eq!(prob, 0.0);
+    }
+
+    #[test]
+    fn test_ctc_decode_blank_collapse() {
+        // Simulate CTC output: blank, blank, token 1 ('0'), token 1, blank, token 2 ('1')
+        // Expected: "01" (two unique non-blank tokens after collapse)
+        let decoder = CtcDecoder::new();
+        let nc = CTC_NUM_CLASSES;
+
+        // 6 timesteps, each with `nc` logits
+        let mut probs = vec![f16::from_f32(-10.0); 6 * nc];
+
+        // t=0: blank (index 0) is highest
+        probs[0] = f16::from_f32(10.0);
+        // t=1: blank again
+        probs[nc] = f16::from_f32(10.0);
+        // t=2: token 1 ('0')
+        probs[2 * nc + 1] = f16::from_f32(10.0);
+        // t=3: token 1 again (should be collapsed)
+        probs[3 * nc + 1] = f16::from_f32(10.0);
+        // t=4: blank
+        probs[4 * nc] = f16::from_f32(10.0);
+        // t=5: token 2 ('1')
+        probs[5 * nc + 2] = f16::from_f32(10.0);
+
+        let results = decoder.decode_cpu(&probs, 1, 6).unwrap();
+        assert_eq!(results[0].text, "01");
+    }
+
+    #[test]
+    fn test_ctc_decode_repeated_with_blank_separator() {
+        // "00" requires: token 1, blank, token 1
+        let decoder = CtcDecoder::new();
+        let nc = CTC_NUM_CLASSES;
+        let mut probs = vec![f16::from_f32(-10.0); 3 * nc];
+
+        // t=0: token 1 ('0')
+        probs[1] = f16::from_f32(10.0);
+        // t=1: blank
+        probs[nc] = f16::from_f32(10.0);
+        // t=2: token 1 ('0') again
+        probs[2 * nc + 1] = f16::from_f32(10.0);
+
+        let results = decoder.decode_cpu(&probs, 1, 3).unwrap();
+        assert_eq!(results[0].text, "00");
+    }
+
+    #[test]
+    fn test_ctc_decode_empty_sequence() {
+        // All blanks → empty string
+        let decoder = CtcDecoder::new();
+        let nc = CTC_NUM_CLASSES;
+        let mut probs = vec![f16::from_f32(-10.0); 4 * nc];
+        for t in 0..4 {
+            probs[t * nc] = f16::from_f32(10.0); // blank highest
+        }
+        let results = decoder.decode_cpu(&probs, 1, 4).unwrap();
+        assert_eq!(results[0].text, "");
+        assert_eq!(results[0].confidence, 0.0);
     }
 }

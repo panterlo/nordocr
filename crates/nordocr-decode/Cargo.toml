@@ -12,6 +12,7 @@ nordocr-core = { workspace = true }
 nordocr-gpu = { workspace = true }
 cudarc = { workspace = true }
 image = { workspace = true }
+tiff = { workspace = true }
 pdfium-render = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

@@ -32,7 +32,7 @@ nordocr-recognize = { path = "crates/nordocr-recognize" }
 nordocr-pipeline = { path = "crates/nordocr-pipeline" }
 
 # CUDA
-cudarc = { version = "0.12", features = ["driver", "nvrtc"] }
+cudarc = { version = "0.19", features = ["driver", "nvrtc", "cuda-13000"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -42,7 +42,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 
 # HTTP server
-axum = "0.7"
+axum = { version = "0.7", features = ["multipart"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 
@@ -63,12 +63,13 @@ clap = { version = "4", features = ["derive"] }
 
 # Image handling
 image = "0.25"
+tiff = "0.9"
 
 # PDF
 pdfium-render = "0.8"
 
 # Misc
-half = { version = "2", features = ["num-traits"] }
+half = { version = "2", features = ["num-traits", "bytemuck"] }
 bytemuck = { version = "1", features = ["derive"] }
 parking_lot = "0.12"
 bytes = "1"
@@ -76,7 +77,7 @@ base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 
 # NVIDIA DALI (forward-looking: GPU-accelerated image decode pipeline)
-nvidia-dali = { version = "1", optional = true }
+nvidia-dali = { version = "1" }
 
 # Build deps
 bindgen = "0.70"

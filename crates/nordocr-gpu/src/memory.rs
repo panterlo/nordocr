@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cudarc::driver::CudaDevice;
+use cudarc::driver::{CudaContext, CudaStream};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
@@ -18,7 +18,8 @@ static POOL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// slabs at startup and carve out buffers from them.
 pub struct GpuMemoryPool {
     id: u64,
-    device: Arc<CudaDevice>,
+    ctx: Arc<CudaContext>,
+    stream: Arc<CudaStream>,
     slabs: Mutex<Vec<Slab>>,
     free_lists: Mutex<BTreeMap<usize, Vec<u64>>>,
     slab_size: usize,
@@ -45,12 +46,13 @@ impl GpuMemoryPool {
     /// Create a new GPU memory pool with a given initial slab size.
     ///
     /// `initial_slab_size` is the size of each pre-allocated chunk (e.g. 256 MB).
-    pub fn new(device: Arc<CudaDevice>, initial_slab_size: usize) -> Result<Self> {
+    pub fn new(ctx: Arc<CudaContext>, stream: Arc<CudaStream>, initial_slab_size: usize) -> Result<Self> {
         let id = POOL_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        let mut pool = Self {
+        let pool = Self {
             id,
-            device,
+            ctx,
+            stream,
             slabs: Mutex::new(Vec::new()),
             free_lists: Mutex::new(BTreeMap::new()),
             slab_size: initial_slab_size,
@@ -130,13 +132,16 @@ impl GpuMemoryPool {
     }
 
     fn allocate_slab(&self, size: usize) -> Result<()> {
-        // Use cudarc to allocate raw device memory.
+        // Use cudarc to allocate raw device memory via the stream.
         let slice = self
-            .device
+            .stream
             .alloc_zeros::<u8>(size)
             .map_err(|e| OcrError::Cuda(format!("slab alloc failed: {e}")))?;
 
-        let base_ptr = *cudarc::driver::DevicePtr::device_ptr(&slice) as u64;
+        let base_ptr = {
+            let (base_ptr_raw, _sync) = cudarc::driver::DevicePtr::device_ptr(&slice, &self.stream);
+            base_ptr_raw as u64
+        };
 
         // Prevent cudarc from freeing this — pool owns it.
         std::mem::forget(slice);
