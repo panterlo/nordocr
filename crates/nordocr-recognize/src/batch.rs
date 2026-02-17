@@ -84,7 +84,11 @@ impl RecognitionBatcher {
             let h = input_h as usize;
             let w = batch.batch_width as usize;
             let batch_elements = b * 3 * h * w;
-            let mut batch_f16 = vec![f16::ZERO; batch_elements];
+            // White padding (1.0 in [-1,1] space) matches training's AspectPreservingResize.
+            // Gray (0.0) padding causes the model's convolutions to corrupt features
+            // at the right boundary, truncating the last few CTC timesteps.
+            let white = f16::from_f32(1.0);
+            let mut batch_f16 = vec![white; batch_elements];
 
             for (batch_idx, &orig_idx) in batch.region_indices.iter().enumerate() {
                 let line = &prepared[orig_idx];
