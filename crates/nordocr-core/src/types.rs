@@ -96,6 +96,10 @@ pub struct TextLine {
     pub confidence: f32,
     pub bbox: BBox,
     pub words: Option<Vec<Word>>,
+    /// Per-character softmax confidence from CTC/AR decoder.
+    /// Omitted from JSON when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub char_confidences: Vec<f32>,
 }
 
 /// OCR results for a single page.

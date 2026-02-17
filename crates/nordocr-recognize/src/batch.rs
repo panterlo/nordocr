@@ -21,6 +21,8 @@ pub struct RecognitionBatcher {
 struct LineBatch {
     /// Indices into the original regions array (for result reassembly).
     region_indices: Vec<usize>,
+    /// Per-item actual widths (before padding to batch_width).
+    item_widths: Vec<u32>,
     /// Actual width of images in this batch (all padded to this width).
     batch_width: u32,
     /// Number of lines in this batch.
@@ -106,20 +108,33 @@ impl RecognitionBatcher {
                 batch.batch_width,
             )?;
 
-            // CTC decode.
-            let seq_len = batch.batch_width / 4; // SVTRv2 stride = 4
-            let decoded = self.decoder.decode_cpu(&output_f16, batch.count, seq_len)?;
+            // CTC decode: per-item seq_len to avoid decoding padded positions.
+            // The batch tensor is padded to batch_width, but each item's actual
+            // content occupies only item_widths[i] pixels. Decoding beyond that
+            // produces garbage from the zero-padded region.
+            let batch_seq_len = batch.batch_width / 4; // SVTRv2 stride = 4
+            let decoded = self.decoder.decode_cpu_per_item(
+                &output_f16,
+                batch.count,
+                batch_seq_len,
+                &batch.item_widths,
+            )?;
 
             // Map results back to original order.
-            for (i, decoded_text) in decoded.into_iter().enumerate() {
+            for (i, mut decoded_text) in decoded.into_iter().enumerate() {
                 let orig_idx = batch.region_indices[i];
                 let region = &regions[orig_idx];
+
+                // Also trim trailing garbage by spatial gap analysis (catches
+                // cases where adjacent content bleeds into the crop itself).
+                decoded_text.trim_trailing_by_position();
 
                 results[orig_idx] = Some(TextLine {
                     text: decoded_text.text,
                     confidence: decoded_text.confidence,
                     bbox: region.bbox,
                     words: None,
+                    char_confidences: decoded_text.char_confidences,
                 });
             }
         }
@@ -143,6 +158,7 @@ impl RecognitionBatcher {
 
             batches.push(LineBatch {
                 region_indices: chunk.iter().map(|&(i, _)| i).collect(),
+                item_widths: chunk.iter().map(|&(_, w)| w.min(max_width)).collect(),
                 batch_width: max_width,
                 count: chunk.len() as u32,
             });

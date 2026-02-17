@@ -4,12 +4,104 @@ use nordocr_gpu::{GpuBuffer, GpuContext};
 
 use crate::charset::{self, CHARSET_SIZE, CTC_BLANK, CTC_NUM_CLASSES, EOS_TOKEN, PAD_TOKEN};
 
-/// Decoded text with per-character confidence scores.
+/// Decoded text with per-character confidence scores and timestep positions.
 #[derive(Debug, Clone)]
 pub struct DecodedText {
     pub text: String,
     pub confidence: f32,
     pub char_confidences: Vec<f32>,
+    /// CTC timestep index where each character was first decoded.
+    /// Timestep T corresponds to spatial position T * stride (stride=4 for SVTRv2).
+    pub char_positions: Vec<u32>,
+}
+
+impl DecodedText {
+    /// Trim trailing characters separated by a large spatial gap in the CTC output.
+    ///
+    /// Addresses trailing garbage from bbox extending into adjacent table cells.
+    /// Uses timestep positions to detect spatial gaps: when the last few chars
+    /// are decoded from timesteps far from the main body (large jump in position),
+    /// they likely come from adjacent content that bled into the crop.
+    ///
+    /// Algorithm:
+    /// 1. Compute gaps between consecutive char timestep positions.
+    /// 2. Find the largest gap in the rightmost 40% of the text.
+    /// 3. If it's >= 2× the median gap AND >= 3 timesteps (~12px), trim after it.
+    /// 4. The trailing fragment must be short (≤ 6 chars, < 25% of total).
+    pub fn trim_trailing_by_position(&mut self) {
+        let n = self.char_positions.len();
+        if n < 4 {
+            return;
+        }
+
+        // Compute inter-character gaps in timestep space.
+        let mut gaps: Vec<(usize, u32)> = Vec::with_capacity(n - 1);
+        for i in 0..n - 1 {
+            let gap = self.char_positions[i + 1].saturating_sub(self.char_positions[i]);
+            gaps.push((i, gap));
+        }
+
+        if gaps.is_empty() {
+            return;
+        }
+
+        // Only look at the rightmost 40% of char positions for trailing gaps.
+        let right_start = n * 60 / 100;
+
+        // Find the largest gap in the right portion.
+        let mut best_gap_idx = 0usize;
+        let mut best_gap_val = 0u32;
+        for &(i, g) in &gaps {
+            if i >= right_start && g > best_gap_val {
+                best_gap_val = g;
+                best_gap_idx = i;
+            }
+        }
+
+        // Must be at least 3 timesteps (~12px) to be a real spatial break.
+        if best_gap_val < 3 {
+            return;
+        }
+
+        // Compute median gap across ALL positions.
+        let mut sorted_gaps: Vec<u32> = gaps.iter().map(|&(_, g)| g).collect();
+        sorted_gaps.sort_unstable();
+        let median_gap = sorted_gaps[sorted_gaps.len() / 2];
+
+        // The trailing gap must be at least 2× the median gap.
+        if median_gap > 0 && best_gap_val < median_gap * 2 {
+            return;
+        }
+
+        // The trailing fragment (chars after the gap) must be small.
+        let trailing_count = n - 1 - best_gap_idx;
+        if trailing_count > 6 || trailing_count * 4 > n {
+            return;
+        }
+
+        // Trim: keep chars up to (and including) best_gap_idx.
+        let keep = best_gap_idx + 1;
+        let chars: Vec<char> = self.text.chars().collect();
+
+        // Also trim trailing spaces that are now exposed.
+        let mut new_len = keep;
+        while new_len > 0 && chars[new_len - 1] == ' ' {
+            new_len -= 1;
+        }
+
+        if new_len < n && new_len >= 1 {
+            self.text = chars[..new_len].iter().collect();
+            self.char_confidences.truncate(new_len);
+            self.char_positions.truncate(new_len);
+
+            // Recompute overall confidence.
+            if !self.char_confidences.is_empty() {
+                let total_log: f32 = self.char_confidences.iter().map(|p| p.ln()).sum();
+                self.confidence =
+                    (total_log / self.char_confidences.len() as f32).exp();
+            }
+        }
+    }
 }
 
 /// Decodes PARSeq logits (GPU) into text strings.
@@ -64,6 +156,7 @@ impl TokenDecoder {
     ) -> Result<DecodedText> {
         let mut text = String::new();
         let mut char_confidences = Vec::new();
+        let mut char_positions = Vec::new();
         let mut total_log_prob = 0.0f32;
         let mut num_chars = 0;
 
@@ -87,6 +180,7 @@ impl TokenDecoder {
             if let Some(c) = charset::token_to_char(best_token) {
                 text.push(c);
                 char_confidences.push(best_prob);
+                char_positions.push(pos as u32);
                 total_log_prob += best_prob.ln();
                 num_chars += 1;
             }
@@ -103,6 +197,7 @@ impl TokenDecoder {
             text,
             confidence,
             char_confidences,
+            char_positions,
         })
     }
 }
@@ -174,6 +269,43 @@ impl CtcDecoder {
         Ok(results)
     }
 
+    /// Decode CTC output with per-item sequence lengths.
+    ///
+    /// Each item in the batch has its own width (`item_widths[i]`), so the CTC
+    /// decode should only process `item_widths[i] / 4` timesteps for item i.
+    /// The output tensor is laid out with `batch_seq_len` timesteps per item
+    /// (padded to the batch-wide maximum).
+    pub fn decode_cpu_per_item(
+        &self,
+        probs_cpu: &[f16],
+        batch_size: u32,
+        batch_seq_len: u32,
+        item_widths: &[u32],
+    ) -> Result<Vec<DecodedText>> {
+        let stride = batch_seq_len as usize * self.num_classes;
+        let mut results = Vec::with_capacity(batch_size as usize);
+
+        for b in 0..batch_size as usize {
+            let offset = b * stride;
+            let end = offset + stride;
+            let batch_probs = if end <= probs_cpu.len() {
+                &probs_cpu[offset..end]
+            } else {
+                &[]
+            };
+            // Use this item's actual width to compute its seq_len.
+            let item_seq_len = if b < item_widths.len() {
+                item_widths[b] / 4
+            } else {
+                batch_seq_len
+            };
+            let decoded = self.decode_single_ctc(b as u32, batch_probs, item_seq_len)?;
+            results.push(decoded);
+        }
+
+        Ok(results)
+    }
+
     fn decode_single_ctc(
         &self,
         _batch_index: u32,
@@ -182,6 +314,7 @@ impl CtcDecoder {
     ) -> Result<DecodedText> {
         let mut text = String::new();
         let mut char_confidences = Vec::new();
+        let mut char_positions = Vec::new();
         let mut total_log_prob = 0.0f32;
         let mut num_chars = 0;
         let mut prev_token: usize = CTC_BLANK;
@@ -206,6 +339,7 @@ impl CtcDecoder {
             if let Some(c) = charset::ctc_token_to_char(best_token) {
                 text.push(c);
                 char_confidences.push(best_prob);
+                char_positions.push(t as u32);
                 total_log_prob += best_prob.ln();
                 num_chars += 1;
             }
@@ -221,6 +355,7 @@ impl CtcDecoder {
             text,
             confidence,
             char_confidences,
+            char_positions,
         })
     }
 }
