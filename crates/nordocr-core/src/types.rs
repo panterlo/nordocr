@@ -133,6 +133,12 @@ pub struct TextRegion {
     pub polygon: Polygon,
     pub confidence: f32,
     pub page_index: u32,
+    /// Row index assigned by clustering (top-to-bottom).
+    pub row: Option<u32>,
+    /// Column index within the row (left-to-right).
+    pub column: Option<u32>,
+    /// Cluster (table section) ID, separated by large vertical gaps.
+    pub cluster_id: Option<u32>,
 }
 
 /// Input file type discrimination.

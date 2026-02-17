@@ -1,10 +1,33 @@
 use nordocr_core::BBox;
 
+/// Info about a connected component extracted from a binary image.
+#[derive(Debug, Clone)]
+pub struct ComponentInfo {
+    pub bbox: BBox,
+    /// Principal axis orientation in degrees [0, 180).
+    /// 0° = horizontal, 90° = vertical.
+    pub orientation_deg: f32,
+    /// Number of foreground pixels in the component.
+    pub pixel_count: u32,
+}
+
 /// Extract bounding boxes of connected components from a binary u8 image.
 ///
 /// White pixels (> 0) are foreground, black (0) is background.
 /// Uses 4-connected two-pass CCL with union-find (path halving).
 pub fn extract_bboxes(binary: &[u8], width: u32, height: u32) -> Vec<BBox> {
+    extract_components(binary, width, height)
+        .into_iter()
+        .map(|c| c.bbox)
+        .collect()
+}
+
+/// Extract connected components with bounding boxes, orientation, and pixel count.
+///
+/// White pixels (> 0) are foreground, black (0) is background.
+/// Uses 4-connected two-pass CCL with union-find (path halving).
+/// Orientation is computed from second-order central moments of each component.
+pub fn extract_components(binary: &[u8], width: u32, height: u32) -> Vec<ComponentInfo> {
     let w = width as usize;
     let h = height as usize;
 
@@ -59,8 +82,22 @@ pub fn extract_bboxes(binary: &[u8], width: u32, height: u32) -> Vec<BBox> {
         parent[i] = find(&mut parent, i as u32);
     }
 
-    // --- Pass 2: compute bounding boxes ---
-    let mut bbox_map: Vec<Option<(u32, u32, u32, u32)>> = vec![None; parent.len()];
+    // --- Pass 2: compute bounding boxes and moments ---
+    // Per-component accumulators: (min_x, min_y, max_x, max_y, sum_x, sum_y, sum_xx, sum_yy, sum_xy, count)
+    struct Accum {
+        min_x: u32,
+        min_y: u32,
+        max_x: u32,
+        max_y: u32,
+        sum_x: f64,
+        sum_y: f64,
+        sum_xx: f64,
+        sum_yy: f64,
+        sum_xy: f64,
+        count: u32,
+    }
+
+    let mut accum_map: Vec<Option<Accum>> = (0..parent.len()).map(|_| None).collect();
 
     for y in 0..h {
         for x in 0..w {
@@ -72,25 +109,72 @@ pub fn extract_bboxes(binary: &[u8], width: u32, height: u32) -> Vec<BBox> {
             let root = parent[label as usize] as usize;
             let xu = x as u32;
             let yu = y as u32;
-            match bbox_map[root] {
-                Some(ref mut e) => {
-                    e.0 = e.0.min(xu);
-                    e.1 = e.1.min(yu);
-                    e.2 = e.2.max(xu);
-                    e.3 = e.3.max(yu);
+            let xf = x as f64;
+            let yf = y as f64;
+            match accum_map[root] {
+                Some(ref mut a) => {
+                    a.min_x = a.min_x.min(xu);
+                    a.min_y = a.min_y.min(yu);
+                    a.max_x = a.max_x.max(xu);
+                    a.max_y = a.max_y.max(yu);
+                    a.sum_x += xf;
+                    a.sum_y += yf;
+                    a.sum_xx += xf * xf;
+                    a.sum_yy += yf * yf;
+                    a.sum_xy += xf * yf;
+                    a.count += 1;
                 }
                 None => {
-                    bbox_map[root] = Some((xu, yu, xu, yu));
+                    accum_map[root] = Some(Accum {
+                        min_x: xu,
+                        min_y: yu,
+                        max_x: xu,
+                        max_y: yu,
+                        sum_x: xf,
+                        sum_y: yf,
+                        sum_xx: xf * xf,
+                        sum_yy: yf * yf,
+                        sum_xy: xf * yf,
+                        count: 1,
+                    });
                 }
             }
         }
     }
 
-    bbox_map
+    accum_map
         .into_iter()
         .flatten()
-        .map(|(x0, y0, x1, y1)| {
-            BBox::new(x0 as f32, y0 as f32, (x1 - x0 + 1) as f32, (y1 - y0 + 1) as f32)
+        .map(|a| {
+            let bbox = BBox::new(
+                a.min_x as f32,
+                a.min_y as f32,
+                (a.max_x - a.min_x + 1) as f32,
+                (a.max_y - a.min_y + 1) as f32,
+            );
+
+            // Compute orientation from central moments.
+            let n = a.count as f64;
+            let cx = a.sum_x / n;
+            let cy = a.sum_y / n;
+            let mu20 = a.sum_xx / n - cx * cx;
+            let mu02 = a.sum_yy / n - cy * cy;
+            let mu11 = a.sum_xy / n - cx * cy;
+
+            // Principal axis angle: 0.5 * atan2(2*mu11, mu20 - mu02)
+            // Returns angle in [-90, 90) degrees from horizontal.
+            let angle_rad = 0.5 * (2.0 * mu11).atan2(mu20 - mu02);
+            // Normalize to [0, 180).
+            let mut angle_deg = angle_rad.to_degrees();
+            if angle_deg < 0.0 {
+                angle_deg += 180.0;
+            }
+
+            ComponentInfo {
+                bbox,
+                orientation_deg: angle_deg as f32,
+                pixel_count: a.count,
+            }
         })
         .collect()
 }

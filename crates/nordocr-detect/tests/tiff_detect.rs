@@ -36,11 +36,13 @@ fn test_morphological_on_document_page() {
         elapsed.as_secs_f64() * 1000.0
     );
     eprintln!(
-        "  Params: kernel={}x{}, iter={}, thresh={}, min={}x{}, pad={}",
+        "  Params: kernel={}x{}, iter={}, block={}, c={}, blur={}, min={}x{}, pad={}",
         detector.kernel_w,
         detector.kernel_h,
         detector.iterations,
-        detector.threshold,
+        detector.adaptive_block_size,
+        detector.adaptive_c,
+        detector.blur_size,
         detector.min_width,
         detector.min_height,
         detector.region_padding,
