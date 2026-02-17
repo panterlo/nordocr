@@ -30,12 +30,33 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("nordocr v{}", env!("CARGO_PKG_VERSION"));
 
     // Load or create config.
-    let config = if let Some(config_path) = &cli.config {
+    let mut config = if let Some(config_path) = &cli.config {
         let data = std::fs::read_to_string(config_path)?;
         serde_json::from_str(&data)?
     } else {
         PipelineConfig::default()
     };
+
+    // Apply CLI overrides for recognition backend.
+    if let Some(backend) = &cli.recognize {
+        match backend {
+            cli::RecognizeBackend::Svtrv2 => {
+                config.recognize_model = nordocr_pipeline::RecogModelArch::SVTRv2;
+            }
+            cli::RecognizeBackend::Tesseract => {
+                config.recognize_model = nordocr_pipeline::RecogModelArch::Tesseract;
+            }
+        }
+    }
+    if let Some(dll) = &cli.tesseract_dll {
+        config.tesseract_dll_path = Some(dll.to_string_lossy().into_owned());
+    }
+    if let Some(td) = &cli.tessdata {
+        config.tessdata_path = Some(td.to_string_lossy().into_owned());
+    }
+    if let Some(lang) = &cli.tess_lang {
+        config.tess_language = Some(lang.clone());
+    }
 
     match cli.command {
         Command::Serve { host, port } => {

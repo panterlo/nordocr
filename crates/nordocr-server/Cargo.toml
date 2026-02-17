@@ -3,6 +3,9 @@ name = "nordocr-server"
 version.workspace = true
 edition.workspace = true
 
+[features]
+tesseract = ["nordocr-pipeline/tesseract"]
+
 [[bin]]
 name = "nordocr"
 path = "src/main.rs"

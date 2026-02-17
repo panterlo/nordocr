@@ -3,6 +3,9 @@ name = "nordocr-recognize"
 version.workspace = true
 edition.workspace = true
 
+[features]
+tesseract = ["dep:libloading", "dep:rayon"]
+
 [dependencies]
 nordocr-core = { workspace = true }
 nordocr-gpu = { workspace = true }
@@ -12,3 +15,5 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 half = { workspace = true }
 bytemuck = { workspace = true }
+libloading = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }

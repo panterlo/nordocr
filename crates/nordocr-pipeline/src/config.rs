@@ -48,6 +48,9 @@ pub enum RecogModelArch {
     /// Heavier model (~100M+ params vs PARSeq's ~20M) — use only if
     /// accuracy on unusual fonts justifies the throughput cost.
     CLIP4STR,
+    /// Tesseract LSTM via runtime DLL loading. CPU-only, no TensorRT needed.
+    /// Requires tesseract_dll_path, tessdata_path, and tess_language in config.
+    Tesseract,
 }
 
 /// TensorRT precision mode for inference engines.
@@ -172,6 +175,16 @@ pub struct PipelineConfig {
     /// Values: "sm_80" (Ampere/Ada) or "sm_120" (RTX 6000 PRO Blackwell).
     /// None = auto-detect from CUDA device properties.
     pub gpu_arch_override: Option<String>,
+
+    /// Path to Tesseract DLL (e.g. "C:/Dev/Ormeo/Ormeo.Tesseract/x64/tesseract55.dll").
+    /// Required when recognize_model = Tesseract.
+    pub tesseract_dll_path: Option<String>,
+    /// Path to tessdata directory containing .traineddata files (e.g. "C:/Tessdata_best").
+    /// Required when recognize_model = Tesseract.
+    pub tessdata_path: Option<String>,
+    /// Tesseract language/model name (e.g. "swe_ormeo_v3").
+    /// Required when recognize_model = Tesseract.
+    pub tess_language: Option<String>,
 }
 
 impl Default for PipelineConfig {
@@ -202,6 +215,9 @@ impl Default for PipelineConfig {
             enable_dali: false,
             dla: DlaOffloadConfig::default(),
             gpu_arch_override: None,
+            tesseract_dll_path: None,
+            tessdata_path: None,
+            tess_language: None,
         }
     }
 }

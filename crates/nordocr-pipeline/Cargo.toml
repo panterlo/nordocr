@@ -3,6 +3,9 @@ name = "nordocr-pipeline"
 version.workspace = true
 edition.workspace = true
 
+[features]
+tesseract = ["nordocr-recognize/tesseract"]
+
 [dependencies]
 nordocr-core = { workspace = true }
 nordocr-gpu = { workspace = true }

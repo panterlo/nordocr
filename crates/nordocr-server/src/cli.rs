@@ -22,6 +22,28 @@ pub struct Cli {
     /// Log level (trace, debug, info, warn, error).
     #[arg(long, default_value = "info", global = true)]
     pub log_level: String,
+
+    /// Recognition backend: svtrv2 (default, GPU/TRT) or tesseract (CPU).
+    #[arg(long, global = true, value_name = "BACKEND")]
+    pub recognize: Option<RecognizeBackend>,
+
+    /// Path to tesseract DLL (e.g. tesseract55.dll). Required for --recognize tesseract.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub tesseract_dll: Option<PathBuf>,
+
+    /// Path to tessdata directory containing .traineddata files.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub tessdata: Option<PathBuf>,
+
+    /// Tesseract language/model name (e.g. "swe_ormeo_v3").
+    #[arg(long, global = true, value_name = "NAME")]
+    pub tess_lang: Option<String>,
+}
+
+#[derive(Clone, Debug, clap::ValueEnum)]
+pub enum RecognizeBackend {
+    Svtrv2,
+    Tesseract,
 }
 
 #[derive(Subcommand)]

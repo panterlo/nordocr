@@ -8,7 +8,7 @@ use nordocr_gpu::{GpuContext, GpuContextConfig};
 use nordocr_preprocess::{PreprocessConfig, PreprocessPipeline};
 use nordocr_recognize::{RecognitionBatcher, RecognitionEngine};
 
-use crate::config::{DetectModelArch, PipelineConfig};
+use crate::config::{DetectModelArch, PipelineConfig, RecogModelArch};
 use crate::scheduler::PageScheduler;
 
 /// The full OCR pipeline: decode → detect → recognize.
@@ -20,12 +20,19 @@ enum DetectionBackend {
     Neural(DetectionBatcher),
 }
 
+/// Recognition backend: TensorRT (GPU) or Tesseract (CPU).
+enum RecognitionBackend {
+    TensorRT(RecognitionBatcher),
+    #[cfg(feature = "tesseract")]
+    Tesseract(nordocr_recognize::TesseractRecognizer),
+}
+
 pub struct OcrPipeline {
     gpu: GpuContext,
     decoder: Decoder,
     preprocess: Option<PreprocessPipeline>,
     detection: DetectionBackend,
-    recognizer: RecognitionBatcher,
+    recognition: RecognitionBackend,
     scheduler: PageScheduler,
     config: PipelineConfig,
 }
@@ -89,15 +96,51 @@ impl OcrPipeline {
             }
         };
 
-        let recog_engine = RecognitionEngine::load(
-            &gpu,
-            Path::new(&config.recognize_engine_path),
-            config.recognize_max_batch,
-            config.recognize_input_height,
-            config.recognize_max_input_width,
-            config.recognize_max_seq_len,
-        )?;
-        let recognizer = RecognitionBatcher::new(recog_engine, config.recognize_max_batch);
+        let recognition = match config.recognize_model {
+            #[cfg(feature = "tesseract")]
+            RecogModelArch::Tesseract => {
+                let dll_path = config.tesseract_dll_path.as_deref().ok_or_else(|| {
+                    OcrError::InvalidInput(
+                        "tesseract_dll_path required when recognize_model = Tesseract".into(),
+                    )
+                })?;
+                let tessdata = config.tessdata_path.as_deref().ok_or_else(|| {
+                    OcrError::InvalidInput(
+                        "tessdata_path required when recognize_model = Tesseract".into(),
+                    )
+                })?;
+                let lang = config.tess_language.as_deref().ok_or_else(|| {
+                    OcrError::InvalidInput(
+                        "tess_language required when recognize_model = Tesseract".into(),
+                    )
+                })?;
+                let tess = nordocr_recognize::TesseractRecognizer::new(
+                    Path::new(dll_path),
+                    tessdata,
+                    lang,
+                )?;
+                RecognitionBackend::Tesseract(tess)
+            }
+            #[cfg(not(feature = "tesseract"))]
+            RecogModelArch::Tesseract => {
+                return Err(OcrError::InvalidInput(
+                    "Tesseract backend requires the 'tesseract' feature flag".into(),
+                ));
+            }
+            _ => {
+                let recog_engine = RecognitionEngine::load(
+                    &gpu,
+                    Path::new(&config.recognize_engine_path),
+                    config.recognize_max_batch,
+                    config.recognize_input_height,
+                    config.recognize_max_input_width,
+                    config.recognize_max_seq_len,
+                )?;
+                RecognitionBackend::TensorRT(
+                    RecognitionBatcher::new(recog_engine, config.recognize_max_batch),
+                )
+            }
+        };
 
         let scheduler = PageScheduler::new(config.num_streams);
 
@@ -108,7 +151,7 @@ impl OcrPipeline {
             decoder,
             preprocess,
             detection,
-            recognizer,
+            recognition,
             scheduler,
             config,
         })
@@ -156,8 +199,15 @@ impl OcrPipeline {
             .collect();
 
         let text_lines = if !all_regions.is_empty() {
-            self.recognizer
-                .recognize_all(&self.gpu, &all_regions, &page_images)?
+            match &mut self.recognition {
+                RecognitionBackend::TensorRT(batcher) => {
+                    batcher.recognize_all(&self.gpu, &all_regions, &page_images)?
+                }
+                #[cfg(feature = "tesseract")]
+                RecognitionBackend::Tesseract(tess) => {
+                    tess.recognize_all(&all_regions, &page_images)?
+                }
+            }
         } else {
             Vec::new()
         };
