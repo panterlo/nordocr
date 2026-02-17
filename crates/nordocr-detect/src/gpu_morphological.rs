@@ -65,8 +65,8 @@ impl GpuMorphologicalDetector {
             dilate_iterations: self.config.iterations,
         };
 
-        // GPU preprocessing → dilated binary mask (CPU memory).
-        let dilated = self.preprocess.execute(ctx, rgb, w, h, &params)?;
+        // GPU preprocessing → binary masks (CPU memory).
+        let (dilated, pre_dilation) = self.preprocess.execute(ctx, rgb, w, h, &params)?;
 
         // CPU CCL → components with bounding boxes and orientation.
         let components = contour::extract_components(&dilated, w, h);
@@ -74,6 +74,9 @@ impl GpuMorphologicalDetector {
         // Split multi-line merges using horizontal projection profile.
         let components =
             contour::split_tall_components(components, &dilated, w, h, self.config.max_height_ratio);
+
+        // Trim small edge fragments (removes leading/trailing garbage).
+        let components = contour::trim_edge_fragments(components, &pre_dilation, w, h);
 
         tracing::debug!(
             page = page_index,

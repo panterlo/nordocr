@@ -216,7 +216,7 @@ impl PipelineConfig {
     pub fn a6000_ada() -> Self {
         Self {
             detect_engine_path: None,
-            recognize_engine_path: "models/recognize_svtrv2_sm86.engine".to_string(),
+            recognize_engine_path: "models/recognize_svtrv2_768_sm86.engine".to_string(),
             gpu_arch_override: Some("sm_86".to_string()),
             precision: InferencePrecision::FP16,
             detect_max_batch: 2,

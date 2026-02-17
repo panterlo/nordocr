@@ -147,6 +147,8 @@ impl MorphologicalDetector {
         drop(gray);
 
         // Step 4: Separable binary dilation.
+        // Keep pre-dilation binary for edge fragment trimming.
+        let pre_dilation = binary.clone();
         let mut current = binary;
         for _ in 0..self.iterations {
             let mut h_dilated = vec![0u8; n];
@@ -163,6 +165,11 @@ impl MorphologicalDetector {
         let components =
             contour::split_tall_components(components, &current, width, height, self.max_height_ratio);
         drop(current);
+
+        // Step 5c: Trim small edge fragments (removes leading/trailing garbage from
+        // adjacent text elements that were bridged by dilation).
+        let components = contour::trim_edge_fragments(components, &pre_dilation, width, height);
+        drop(pre_dilation);
 
         tracing::debug!(
             page = page_index,

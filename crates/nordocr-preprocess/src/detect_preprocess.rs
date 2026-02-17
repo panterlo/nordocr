@@ -114,9 +114,12 @@ impl DetectPreprocessKernel {
         })
     }
 
-    /// Process RGB u8 HWC image on GPU, returning dilated binary mask on CPU.
+    /// Process RGB u8 HWC image on GPU, returning binary masks on CPU.
     ///
     /// All image processing runs on GPU (grayscale, blur, threshold, dilation).
+    /// Returns `(dilated_binary, pre_dilation_binary)`:
+    /// - `dilated_binary`: for CCL (characters connected into lines)
+    /// - `pre_dilation_binary`: for edge fragment trimming
     pub fn execute(
         &self,
         ctx: &GpuContext,
@@ -124,7 +127,7 @@ impl DetectPreprocessKernel {
         w: u32,
         h: u32,
         params: &DetectPreprocessParams,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
         let width = w as i32;
         let height = h as i32;
         let n = (w * h) as usize;
@@ -252,6 +255,11 @@ impl DetectPreprocessKernel {
         drop(gray);
         drop(integral);
 
+        // Download pre-dilation binary for edge fragment trimming.
+        let pre_dilation: Vec<u8> = stream
+            .clone_dtoh(&binary)
+            .map_err(|e| OcrError::Cuda(format!("pre-dilation download failed: {e}")))?;
+
         // Step 5: Separable dilation (multiple iterations).
         let kernel_w = params.dilate_kernel_w as i32;
         let kernel_h = params.dilate_kernel_h as i32;
@@ -302,6 +310,6 @@ impl DetectPreprocessKernel {
             .clone_dtoh(&current)
             .map_err(|e| OcrError::Cuda(format!("binary mask download failed: {e}")))?;
 
-        Ok(dilated)
+        Ok((dilated, pre_dilation))
     }
 }

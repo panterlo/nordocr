@@ -165,9 +165,14 @@ def find_nordocr_binary(repo_root):
 def find_engine_path(repo_root):
     """Find the best available recognition engine file."""
     models = repo_root / "models"
-    # Prefer sm86 (Ampere dev machine), then sm89, then sm120
-    for suffix in ["sm86", "sm89", "sm120"]:
-        p = models / f"recognize_svtrv2_{suffix}.engine"
+    # Prefer 768px model (better accuracy), then 384px, then any engine
+    for name in [
+        "recognize_svtrv2_768_sm86.engine",
+        "recognize_svtrv2_sm86.engine",
+        "recognize_svtrv2_sm89.engine",
+        "recognize_svtrv2_sm120.engine",
+    ]:
+        p = models / name
         if p.exists():
             return str(p)
     # Fallback: any engine file
@@ -191,9 +196,9 @@ def decode_tiff_pages(tiff_path):
     return pages
 
 
-def build_config_json(repo_root):
+def build_config_json(repo_root, engine_override=None):
     """Write a minimal pipeline config JSON, return path to temp file."""
-    engine = find_engine_path(repo_root)
+    engine = engine_override or find_engine_path(repo_root)
     if not engine:
         print("ERROR: No recognition engine found in models/", file=sys.stderr)
         print("  Build one with: python training/recognize/build_trt_engine.py", file=sys.stderr)
@@ -290,7 +295,7 @@ def run_nordocr_single(binary, config_path, image_path, env):
         return None
 
 
-def run_nordocr(pages, repo_root):
+def run_nordocr(pages, repo_root, engine_override=None):
     """Run nordocr pipeline on pre-decoded PIL pages.
 
     Converts each page to a temp PNG (avoids TIFF Fax4 incompatibility with
@@ -302,7 +307,7 @@ def run_nordocr(pages, repo_root):
         print("  Build with: cargo build --release", file=sys.stderr)
         sys.exit(1)
 
-    config_path = build_config_json(repo_root)
+    config_path = build_config_json(repo_root, engine_override)
     env = build_env()
     all_pages = []
     timing_totals = {"decode_ms": 0, "preprocess_ms": 0, "detect_ms": 0, "recognize_ms": 0, "total_ms": 0}
@@ -385,6 +390,9 @@ def main():
     parser.add_argument(
         "--workers", "-w", type=int, default=4, help="VLM query workers (default: 4)"
     )
+    parser.add_argument(
+        "--engine", "-e", help="Path to recognition engine (overrides auto-detect)"
+    )
     args = parser.parse_args()
 
     tiff_path = Path(args.input).resolve()
@@ -411,7 +419,8 @@ def main():
 
     # 2. Run nordocr pipeline (page-by-page via temp PNGs to avoid Fax4 issues).
     print("\nRunning nordocr pipeline...", file=sys.stderr)
-    nordocr_output = run_nordocr(pages, repo_root)
+    engine_path = str(Path(args.engine).resolve()) if args.engine else None
+    nordocr_output = run_nordocr(pages, repo_root, engine_override=engine_path)
     timing = nordocr_output.get("timing", {})
     page_results = nordocr_output.get("pages", [])
     total_lines = sum(len(p.get("lines", [])) for p in page_results)
@@ -487,14 +496,38 @@ def main():
     diff_count = sum(1 for r in valid if not r["case_match"])
     avg_cer = sum(r["cer"] for r in valid) / len(valid)
 
+    # Space-insensitive match: collapse all whitespace for comparison.
+    space_match = sum(
+        1
+        for r in valid
+        if not r["exact"]
+        and normalize_text(r["nordocr_text"]).replace(" ", "")
+        == normalize_text(r["vlm_text"]).replace(" ", "")
+    )
+
+    # Leading garbage: nordocr text starts with 1-7 garbage chars before VLM text.
+    leading_garbage = 0
+    for r in valid:
+        if r["exact"]:
+            continue
+        n = normalize_text(r["nordocr_text"])
+        v = normalize_text(r["vlm_text"])
+        if len(v) < 5 or len(n) < 5:
+            continue
+        for i in range(1, min(8, len(n))):
+            if len(v) >= 8 and n[i : i + 8] == v[:8]:
+                leading_garbage += 1
+                break
+
     print(f"\n{'='*50}", file=sys.stderr)
     print(f"  nordocr vs VLM Evaluation", file=sys.stderr)
     print(f"{'='*50}", file=sys.stderr)
     print(f"  Total regions:  {len(results)}", file=sys.stderr)
     print(f"  VLM errors:     {len(errors)}", file=sys.stderr)
     print(f"  Exact match:    {exact_count}/{len(valid)} ({exact_count/len(valid)*100:.1f}%)", file=sys.stderr)
+    print(f"  + space match:  {exact_count+space_match}/{len(valid)} ({(exact_count+space_match)/len(valid)*100:.1f}%)", file=sys.stderr)
     print(f"  Case match:     {case_count}/{len(valid)} ({case_count/len(valid)*100:.1f}%)", file=sys.stderr)
-    print(f"  Different:      {diff_count}/{len(valid)} ({diff_count/len(valid)*100:.1f}%)", file=sys.stderr)
+    print(f"  Leading garbage: {leading_garbage}/{len(valid)}", file=sys.stderr)
     print(f"  Average CER:    {avg_cer:.4f} ({avg_cer*100:.2f}%)", file=sys.stderr)
     print(f"  Pipeline time:  {timing.get('total_ms', 0):.0f}ms", file=sys.stderr)
 
