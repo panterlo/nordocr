@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 nordocr-core = { workspace = true }
 nordocr-gpu = { workspace = true }
+nordocr-preprocess = { workspace = true }
 nordocr-trt = { workspace = true }
 cudarc = { workspace = true }
 tracing = { workspace = true }
@@ -15,3 +16,5 @@ half = { workspace = true }
 [dev-dependencies]
 tiff = { workspace = true }
 image = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }

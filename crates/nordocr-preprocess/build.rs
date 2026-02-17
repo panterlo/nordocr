@@ -3,23 +3,23 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// GPU targets:
-///   sm_89  — A6000 Ada (development)
+///   sm_80  — Ampere/Ada (development): covers sm_80, sm_86 (A6000), sm_89 (Ada)
 ///   sm_120 — RTX 6000 PRO Blackwell (production)
 ///
 /// By default we compile fat binaries with both architectures so the
 /// same binary runs on either GPU. The CUDA driver picks the best match
 /// at load time, or JIT-compiles from the embedded PTX if needed.
 ///
-/// Override via: NORDOCR_CUDA_ARCHS="sm_89,sm_120"
-/// For dev-only builds: NORDOCR_CUDA_ARCHS="sm_89"
-const DEFAULT_ARCHS: &str = "sm_89,sm_120";
-const ALL_ARCHS: &[&str] = &["sm_89", "sm_120"];
+/// Override via: NORDOCR_CUDA_ARCHS="sm_80,sm_120"
+/// For dev-only builds: NORDOCR_CUDA_ARCHS="sm_80"
+const DEFAULT_ARCHS: &str = "sm_80,sm_120";
+const ALL_ARCHS: &[&str] = &["sm_80", "sm_120"];
 
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let kernels_dir = Path::new("kernels");
 
-    let kernels = ["binarize", "deskew", "denoise", "morphology"];
+    let kernels = ["binarize", "deskew", "denoise", "morphology", "detect_preprocess"];
 
     let archs_str =
         env::var("NORDOCR_CUDA_ARCHS").unwrap_or_else(|_| DEFAULT_ARCHS.to_string());
@@ -48,13 +48,13 @@ fn main() {
         println!("cargo:rerun-if-changed={}", cu_file.display());
 
         // Compile a separate .ptx per architecture, named {kernel}_{arch}.ptx
-        // e.g. binarize_sm_89.ptx, binarize_sm_120.ptx
+        // e.g. binarize_sm80.ptx, binarize_sm120.ptx
         for arch in &archs {
             let safe_arch = arch.replace("sm_", "sm");
             let ptx_file = out_dir.join(format!("{kernel}_{safe_arch}.ptx"));
 
             // Extract compute capability number for --gencode.
-            // sm_89 → compute_89, sm_120 → compute_120
+            // sm_80 → compute_80, sm_120 → compute_120
             let compute = arch.replace("sm_", "compute_");
 
             let status = Command::new("nvcc")

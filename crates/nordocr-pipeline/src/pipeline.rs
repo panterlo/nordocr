@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use nordocr_core::{FileInput, OcrError, PageResult, RawImage, Result, TextRegion, TimingInfo};
 use nordocr_decode::Decoder;
-use nordocr_detect::{DetectionBatcher, DetectionEngine, DetectionPostprocessor, MorphologicalDetector};
+use nordocr_detect::{DetectionBatcher, DetectionEngine, DetectionPostprocessor, GpuMorphologicalDetector, MorphologicalDetector};
 use nordocr_gpu::{GpuContext, GpuContextConfig};
 use nordocr_preprocess::{PreprocessConfig, PreprocessPipeline};
 use nordocr_recognize::{RecognitionBatcher, RecognitionEngine};
@@ -13,9 +13,10 @@ use crate::scheduler::PageScheduler;
 
 /// The full OCR pipeline: decode → detect → recognize.
 ///
-/// Detection backend: either morphological (CPU) or neural (TRT).
+/// Detection backend: morphological (CPU or GPU) or neural (TRT).
 enum DetectionBackend {
     Morphological(MorphologicalDetector),
+    GpuMorphological(GpuMorphologicalDetector),
     Neural(DetectionBatcher),
 }
 
@@ -53,8 +54,20 @@ impl OcrPipeline {
 
         let detection = match config.detect_model {
             DetectModelArch::Morphological => {
-                tracing::info!("using morphological text detection (CPU)");
-                DetectionBackend::Morphological(MorphologicalDetector::default())
+                // Try GPU-accelerated morphological detection first.
+                match GpuMorphologicalDetector::new(&gpu) {
+                    Ok(gpu_det) => {
+                        tracing::info!("using morphological text detection (GPU)");
+                        DetectionBackend::GpuMorphological(gpu_det)
+                    }
+                    Err(e) => {
+                        tracing::info!(
+                            reason = %e,
+                            "GPU morphological detection unavailable, falling back to CPU"
+                        );
+                        DetectionBackend::Morphological(MorphologicalDetector::default())
+                    }
+                }
             }
             DetectModelArch::DBNetPP | DetectModelArch::RTMDet => {
                 let engine_path = config.detect_engine_path.as_deref().ok_or_else(|| {
@@ -207,7 +220,26 @@ impl OcrPipeline {
                     tracing::debug!(
                         page = page_idx,
                         regions = regions.len(),
-                        "morphological detection"
+                        "morphological detection (CPU)"
+                    );
+                    all_regions.push(regions);
+                }
+                Ok(all_regions)
+            }
+            DetectionBackend::GpuMorphological(detector) => {
+                let mut all_regions = Vec::with_capacity(page_images.len());
+                for (page_idx, page) in page_images.iter().enumerate() {
+                    let regions = detector.detect(
+                        &self.gpu,
+                        &page.data,
+                        page.width,
+                        page.height,
+                        page_idx as u32,
+                    )?;
+                    tracing::debug!(
+                        page = page_idx,
+                        regions = regions.len(),
+                        "morphological detection (GPU)"
                     );
                     all_regions.push(regions);
                 }

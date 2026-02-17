@@ -56,7 +56,7 @@ pub enum InferencePrecision {
     /// FP32 — maximum accuracy, lowest throughput. Debugging only.
     FP32,
     /// FP16 — good accuracy/speed tradeoff. Works on all GPUs.
-    /// Use this on A6000 Ada (sm_89).
+    /// Use this on A6000 Ampere (sm_86).
     #[default]
     FP16,
     /// FP8 (E4M3) — ~2x throughput over FP16. Requires Blackwell (sm_120)
@@ -109,7 +109,7 @@ impl Default for DlaOffloadConfig {
 /// for each target GPU. The engine paths should point to files built
 /// for the GPU this process will run on:
 ///
-/// - **Development (A6000 Ada, sm_89)**: `models/detect_sm89.engine`
+/// - **Development (A6000 Ampere, sm_86)**: `models/detect_sm86.engine`
 /// - **Production (RTX 6000 PRO Blackwell, sm_120)**: `models/detect_sm120.engine`
 ///
 /// CUDA kernels (preprocessing) are compiled as fat binaries containing
@@ -169,7 +169,7 @@ pub struct PipelineConfig {
     /// DLA offload configuration (Blackwell only).
     pub dla: DlaOffloadConfig,
     /// Override GPU architecture instead of auto-detecting.
-    /// Values: "sm_89" (A6000 Ada) or "sm_120" (RTX 6000 PRO Blackwell).
+    /// Values: "sm_80" (Ampere/Ada) or "sm_120" (RTX 6000 PRO Blackwell).
     /// None = auto-detect from CUDA device properties.
     pub gpu_arch_override: Option<String>,
 }
@@ -208,16 +208,16 @@ impl Default for PipelineConfig {
 
 /// Configuration presets for known GPU targets.
 impl PipelineConfig {
-    /// Preset for development on A6000 Ada (sm_89, 48 GB VRAM).
+    /// Preset for development on A6000 Ampere (sm_86, 48 GB VRAM).
     ///
-    /// Uses FP16 precision (FP8/FP4 not available on Ada).
-    /// No DLA (Ada doesn't have dedicated DLA cores).
-    /// Smaller batch sizes to match Ada's SM count.
+    /// Uses FP16 precision (FP8/FP4 not available on Ampere).
+    /// No DLA (Ampere doesn't have dedicated DLA cores).
+    /// Smaller batch sizes to match Ampere's SM count.
     pub fn a6000_ada() -> Self {
         Self {
             detect_engine_path: None,
-            recognize_engine_path: "models/recognize_svtrv2_sm89.engine".to_string(),
-            gpu_arch_override: Some("sm_89".to_string()),
+            recognize_engine_path: "models/recognize_svtrv2_sm86.engine".to_string(),
+            gpu_arch_override: Some("sm_86".to_string()),
             precision: InferencePrecision::FP16,
             detect_max_batch: 2,
             recognize_max_batch: 32,

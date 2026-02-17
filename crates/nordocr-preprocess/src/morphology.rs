@@ -31,7 +31,7 @@ impl MorphologyKernel {
     pub fn new(ctx: &GpuContext, arch: GpuArch) -> Result<Self> {
         let ptx = gpu_arch::select_ptx(
             arch,
-            include_str!(concat!(env!("OUT_DIR"), "/morphology_sm89.ptx")),
+            include_str!(concat!(env!("OUT_DIR"), "/morphology_sm80.ptx")),
             include_str!(concat!(env!("OUT_DIR"), "/morphology_sm120.ptx")),
         );
 

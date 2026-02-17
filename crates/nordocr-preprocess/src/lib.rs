@@ -1,12 +1,14 @@
 pub mod binarize;
 pub mod denoise;
 pub mod deskew;
+pub mod detect_preprocess;
 pub mod gpu_arch;
 pub mod morphology;
 
 pub use binarize::{BinarizeKernel, BinarizeParams};
 pub use denoise::{DenoiseKernel, DenoiseMethod};
 pub use deskew::{DeskewKernel, DeskewParams, DeskewResult};
+pub use detect_preprocess::{DetectPreprocessKernel, DetectPreprocessParams};
 pub use gpu_arch::GpuArch;
 pub use morphology::{MorphOp, MorphologyKernel};
 

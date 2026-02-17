@@ -47,7 +47,7 @@ impl DeskewKernel {
     pub fn new(ctx: &GpuContext, arch: GpuArch) -> Result<Self> {
         let ptx = gpu_arch::select_ptx(
             arch,
-            include_str!(concat!(env!("OUT_DIR"), "/deskew_sm89.ptx")),
+            include_str!(concat!(env!("OUT_DIR"), "/deskew_sm80.ptx")),
             include_str!(concat!(env!("OUT_DIR"), "/deskew_sm120.ptx")),
         );
 

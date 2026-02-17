@@ -179,6 +179,157 @@ pub fn extract_components(binary: &[u8], width: u32, height: u32) -> Vec<Compone
         .collect()
 }
 
+/// Split components that are significantly taller than the typical line height.
+///
+/// When dilation bridges adjacent text lines, the resulting component spans
+/// multiple lines. This function detects such merges by comparing component
+/// height against the median and splits them at horizontal gaps in the
+/// binary mask's foreground projection profile.
+///
+/// `max_height_ratio`: components taller than `median_height * ratio` are split.
+/// Typical value: 1.8 (catches 2-line merges and beyond).
+pub fn split_tall_components(
+    components: Vec<ComponentInfo>,
+    binary: &[u8],
+    width: u32,
+    height: u32,
+    max_height_ratio: f32,
+) -> Vec<ComponentInfo> {
+    if components.len() < 3 {
+        return components;
+    }
+
+    // Compute median height of reasonably-sized components.
+    let mut heights: Vec<f32> = components
+        .iter()
+        .filter(|c| c.bbox.height >= 10.0)
+        .map(|c| c.bbox.height)
+        .collect();
+
+    if heights.len() < 3 {
+        return components;
+    }
+
+    heights.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median_h = heights[heights.len() / 2];
+    let split_threshold = median_h * max_height_ratio;
+
+    let w = width as usize;
+    let h = height as usize;
+    let mut result = Vec::with_capacity(components.len());
+
+    for comp in components {
+        if comp.bbox.height <= split_threshold {
+            result.push(comp);
+            continue;
+        }
+
+        // This component is too tall — try to split it.
+        let x0 = (comp.bbox.x as usize).min(w.saturating_sub(1));
+        let y0 = (comp.bbox.y as usize).min(h.saturating_sub(1));
+        let bw = (comp.bbox.width as usize).min(w - x0);
+        let bh = (comp.bbox.height as usize).min(h - y0);
+
+        if bh < 10 || bw < 5 {
+            result.push(comp);
+            continue;
+        }
+
+        // Compute horizontal projection (count foreground pixels per row).
+        let mut projection = vec![0u32; bh];
+        for dy in 0..bh {
+            let row_start = (y0 + dy) * w + x0;
+            let mut count = 0u32;
+            for dx in 0..bw {
+                if binary[row_start + dx] > 0 {
+                    count += 1;
+                }
+            }
+            projection[dy] = count;
+        }
+
+        let max_proj = *projection.iter().max().unwrap_or(&1);
+        if max_proj == 0 {
+            result.push(comp);
+            continue;
+        }
+
+        // Find valleys: rows where projection < 30% of max.
+        let valley_thresh = (max_proj as f32 * 0.3) as u32;
+
+        // Don't split within the top or bottom 20% of the component.
+        let margin = bh / 5;
+        let search_start = margin.max(1);
+        let search_end = bh.saturating_sub(margin).max(search_start + 1);
+
+        // Find valley segments (consecutive rows below threshold).
+        let mut valleys: Vec<(usize, usize)> = Vec::new();
+        let mut in_valley = false;
+        let mut valley_start = 0;
+
+        for dy in search_start..search_end {
+            if projection[dy] <= valley_thresh {
+                if !in_valley {
+                    valley_start = dy;
+                    in_valley = true;
+                }
+            } else if in_valley {
+                valleys.push((valley_start, dy));
+                in_valley = false;
+            }
+        }
+        if in_valley {
+            valleys.push((valley_start, search_end));
+        }
+
+        if valleys.is_empty() {
+            // No clear valley — keep as is.
+            result.push(comp);
+            continue;
+        }
+
+        // Use valley midpoints as split coordinates.
+        let mut split_ys: Vec<usize> = valleys.iter().map(|(s, e)| (s + e) / 2).collect();
+        split_ys.sort();
+
+        // Create sub-components.
+        let min_sub_h = 5usize;
+        let mut prev_dy = 0usize;
+        for &split_dy in &split_ys {
+            let sub_h = split_dy - prev_dy;
+            if sub_h >= min_sub_h {
+                result.push(ComponentInfo {
+                    bbox: BBox::new(
+                        comp.bbox.x,
+                        (y0 + prev_dy) as f32,
+                        comp.bbox.width,
+                        sub_h as f32,
+                    ),
+                    orientation_deg: comp.orientation_deg,
+                    pixel_count: projection[prev_dy..split_dy].iter().sum(),
+                });
+            }
+            prev_dy = split_dy;
+        }
+        // Final segment.
+        let sub_h = bh - prev_dy;
+        if sub_h >= min_sub_h {
+            result.push(ComponentInfo {
+                bbox: BBox::new(
+                    comp.bbox.x,
+                    (y0 + prev_dy) as f32,
+                    comp.bbox.width,
+                    sub_h as f32,
+                ),
+                orientation_deg: comp.orientation_deg,
+                pixel_count: projection[prev_dy..bh].iter().sum(),
+            });
+        }
+    }
+
+    result
+}
+
 /// Union-find with path halving.
 fn find(parent: &mut [u32], mut x: u32) -> u32 {
     while parent[x as usize] != x {
@@ -226,6 +377,66 @@ mod tests {
         img[39] = 255;
         let bbs = extract_bboxes(&img, 10, 5);
         assert_eq!(bbs.len(), 2);
+    }
+
+    #[test]
+    fn split_tall_component() {
+        // Simulate two horizontal text lines merged into one tall component.
+        // Image: 100x80, two blobs at y=10..30 and y=50..70, gap at y=30..50.
+        let w = 100usize;
+        let h = 80usize;
+        let mut binary = vec![0u8; w * h];
+
+        // Top line: y=10..30
+        for y in 10..30 {
+            for x in 10..90 {
+                binary[y * w + x] = 255;
+            }
+        }
+        // Bottom line: y=50..70
+        for y in 50..70 {
+            for x in 10..90 {
+                binary[y * w + x] = 255;
+            }
+        }
+
+        // Create one merged component spanning both lines.
+        let components = vec![
+            ComponentInfo {
+                bbox: BBox::new(10.0, 10.0, 80.0, 60.0),
+                orientation_deg: 0.0,
+                pixel_count: 80 * 40,
+            },
+            // A normal-height component for median calculation.
+            ComponentInfo {
+                bbox: BBox::new(10.0, 75.0, 40.0, 20.0),
+                orientation_deg: 0.0,
+                pixel_count: 40 * 20,
+            },
+            ComponentInfo {
+                bbox: BBox::new(50.0, 75.0, 40.0, 20.0),
+                orientation_deg: 0.0,
+                pixel_count: 40 * 20,
+            },
+        ];
+
+        let result = split_tall_components(components, &binary, w as u32, h as u32, 1.8);
+
+        // The tall component (60px) should be split; median is ~20px, threshold ~36px.
+        // We should get 2 sub-components from the split + 2 normal ones = 4.
+        assert!(
+            result.len() >= 4,
+            "expected >= 4 components after split, got {}",
+            result.len()
+        );
+
+        // The two normal components should still be there.
+        let normal_count = result.iter().filter(|c| c.bbox.height <= 25.0).count();
+        assert!(normal_count >= 2, "normal components should be preserved");
+
+        // The split should produce sub-components shorter than the original 60px.
+        let tall_count = result.iter().filter(|c| c.bbox.height > 36.0).count();
+        assert_eq!(tall_count, 0, "no component should remain taller than threshold");
     }
 
     #[test]

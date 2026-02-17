@@ -1448,7 +1448,10 @@ dependencies = [
  "image",
  "nordocr-core",
  "nordocr-gpu",
+ "nordocr-preprocess",
  "nordocr-trt",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tiff 0.9.1",
  "tracing",
@@ -1471,6 +1474,8 @@ name = "nordocr-pipeline"
 version = "0.1.0"
 dependencies = [
  "cudarc",
+ "half",
+ "image",
  "nordocr-core",
  "nordocr-decode",
  "nordocr-detect",
@@ -1478,6 +1483,7 @@ dependencies = [
  "nordocr-preprocess",
  "nordocr-recognize",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

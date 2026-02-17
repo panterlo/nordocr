@@ -37,7 +37,7 @@ impl BinarizeKernel {
     pub fn new(ctx: &GpuContext, arch: GpuArch) -> Result<Self> {
         let ptx = gpu_arch::select_ptx(
             arch,
-            include_str!(concat!(env!("OUT_DIR"), "/binarize_sm89.ptx")),
+            include_str!(concat!(env!("OUT_DIR"), "/binarize_sm80.ptx")),
             include_str!(concat!(env!("OUT_DIR"), "/binarize_sm120.ptx")),
         );
 
@@ -97,7 +97,7 @@ impl BinarizeKernel {
         //    ));
         //
         // 3. Run adaptive binarize
-        //    let block_2d = (32, 32, 1);  // works well on both sm_89 and sm_120
+        //    let block_2d = (32, 32, 1);  // works well on both sm_80 and sm_120
         //    let grid_2d = (width.div_ceil(32), height.div_ceil(32), 1);
         //    launch!(adaptive_binarize<<<grid_2d, block_2d, 0, stream>>>(
         //        input.ptr(), integral.ptr(), integral_sq.ptr(),

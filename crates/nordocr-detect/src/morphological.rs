@@ -55,8 +55,14 @@ pub struct MorphologicalDetector {
     /// Regions with orientation in [min, max] or [180-max, 180-min] are filtered.
     pub rotation_angle_max: f32,
 
+    // --- Multi-line splitting ---
+    /// Maximum component height as ratio of median height before splitting.
+    /// Components taller than `median_height * max_height_ratio` are split at
+    /// horizontal projection valleys. Default: 1.8.
+    pub max_height_ratio: f32,
+
     // --- Padding ---
-    /// Padding added around each detected region (pixels). Default: 5.
+    /// Padding added around each detected region (pixels). Default: 8.
     pub region_padding: u32,
 
     // --- Row/column clustering ---
@@ -87,7 +93,8 @@ impl Default for MorphologicalDetector {
             filter_rotation: true,
             rotation_angle_min: 4.0,
             rotation_angle_max: 86.0,
-            region_padding: 5,
+            max_height_ratio: 1.8,
+            region_padding: 8,
             max_row_y_distance: 20,
             min_cluster_gap: 80,
             cluster_min_height: 20,
@@ -151,6 +158,10 @@ impl MorphologicalDetector {
 
         // Step 5: CCL → bounding boxes with orientation.
         let components = contour::extract_components(&current, width, height);
+
+        // Step 5b: Split multi-line merges (vertical).
+        let components =
+            contour::split_tall_components(components, &current, width, height, self.max_height_ratio);
         drop(current);
 
         tracing::debug!(
@@ -159,7 +170,22 @@ impl MorphologicalDetector {
             "morphological detection: raw components"
         );
 
-        // Step 6: Filter by size, margin, and rotation.
+        // Steps 6-8: Filter, sort, and cluster (shared with GPU path).
+        self.filter_and_cluster(components, width, height, page_index)
+    }
+
+    /// Filter components by size/margin/rotation, sort, pad, and assign row/column clusters.
+    ///
+    /// This is the CPU post-processing shared between the CPU and GPU detection paths.
+    /// The GPU path produces identical components via GPU kernels + CPU CCL, then
+    /// calls this method for filtering and clustering.
+    pub fn filter_and_cluster(
+        &self,
+        components: Vec<contour::ComponentInfo>,
+        width: u32,
+        height: u32,
+        page_index: u32,
+    ) -> Vec<TextRegion> {
         let min_w = self.min_width as f32;
         let min_h = self.min_height as f32;
         let page_w = width as f32;
@@ -181,8 +207,6 @@ impl MorphologicalDetector {
                 // Rotation filter
                 if self.filter_rotation {
                     let angle = c.orientation_deg;
-                    // Filter regions whose orientation is "diagonal" — not close to
-                    // horizontal (0°/180°) or vertical (90°).
                     let in_range = |a: f32| {
                         a > self.rotation_angle_min && a < self.rotation_angle_max
                     };
@@ -219,7 +243,7 @@ impl MorphologicalDetector {
             })
             .collect();
 
-        // Step 7: Sort top-to-bottom, left-to-right.
+        // Sort top-to-bottom, left-to-right.
         regions.sort_by(|a, b| {
             let y_cmp = a.bbox.y.partial_cmp(&b.bbox.y).unwrap();
             if y_cmp == std::cmp::Ordering::Equal {
@@ -235,7 +259,7 @@ impl MorphologicalDetector {
             "morphological detection: after filtering"
         );
 
-        // Step 8: Row/column clustering.
+        // Row/column clustering.
         self.assign_rows_and_columns(&mut regions);
 
         regions
@@ -246,7 +270,7 @@ impl MorphologicalDetector {
     /// If a region starts inside a margin zone, it's only kept if >50% of its
     /// extent reaches past the margin. Regions entirely in the far margin are
     /// always filtered.
-    fn passes_margin_filter(&self, bbox: &BBox, page_w: f32, page_h: f32) -> bool {
+    pub fn passes_margin_filter(&self, bbox: &BBox, page_w: f32, page_h: f32) -> bool {
         let left = bbox.x;
         let top = bbox.y;
         let right = bbox.x + bbox.width;
@@ -297,7 +321,7 @@ impl MorphologicalDetector {
     /// 1. Group into rows by Y-center proximity
     /// 2. Assign column indices within each row (by X order)
     /// 3. Detect table sections (clusters) by large vertical gaps between rows
-    fn assign_rows_and_columns(&self, regions: &mut [TextRegion]) {
+    pub fn assign_rows_and_columns(&self, regions: &mut [TextRegion]) {
         let min_h = self.cluster_min_height as f32;
 
         // Collect indices of regions tall enough for clustering.
@@ -592,7 +616,9 @@ mod tests {
     }
 
     #[test]
-    fn solid_black_page_one_region() {
+    fn solid_black_page_no_regions() {
+        // A uniform image (all same color) produces no foreground with adaptive
+        // thresholding because there's no local contrast.
         let img = make_black_rgb(200, 200);
         let det = MorphologicalDetector {
             min_width: 1,
@@ -604,7 +630,7 @@ mod tests {
             ..Default::default()
         };
         let regions = det.detect(&img, 200, 200, 0);
-        assert!(!regions.is_empty());
+        assert!(regions.is_empty());
     }
 
     #[test]

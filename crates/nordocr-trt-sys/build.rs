@@ -109,8 +109,11 @@ fn main() {
         println!("cargo:rustc-link-lib=nvinfer");
     }
 
-    // Also need libstdc++ for the C++ shim.
-    println!("cargo:rustc-link-lib=stdc++");
+    // On non-MSVC platforms, need libstdc++ for the C++ shim.
+    // MSVC links the C++ runtime automatically.
+    if !cfg!(target_env = "msvc") {
+        println!("cargo:rustc-link-lib=stdc++");
+    }
 }
 
 /// Find the CUDA include directory containing cuda_runtime_api.h.
