@@ -1,0 +1,11 @@
+blank_index: 0
+charset_size: 125
+decoder: CTC
+input_height: 32
+max_width_tested: 1792
+model: SVTRv2
+normalization:
+  mean: 0.5
+  std: 0.5
+num_classes: 126
+stride: 4
