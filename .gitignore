@@ -4,8 +4,8 @@
 **/OUT_DIR/
 
 # Generated TensorRT engines (too large for git, must be rebuilt per-GPU)
-/models/*.engine
-/models/*.plan
+/models/**/*.engine
+/models/**/*.plan
 
 # Training outputs
 /training/**/output/
